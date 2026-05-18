@@ -1,0 +1,367 @@
+"""
+main.py — FastAPI application entry point for the VA Automation Platform.
+"""
+
+import logging
+import os
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Annotated, Any
+
+from celery import Celery
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, HttpUrl, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import crud
+from db.database import engine, get_db
+from db.models import Base
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("va_platform.main")
+
+_celery = Celery(broker=os.getenv("REDIS_URL", "redis://redis:6379/0"))
+
+# API key — set API_KEY in .env; default is dev-only and must be changed in production
+API_KEY: str = os.getenv("API_KEY", "changeme_api_key_dev_2024")
+
+# Routes that bypass API key auth (public endpoints)
+_PUBLIC_PATHS: frozenset[str] = frozenset({"/health", "/docs", "/openapi.json", "/redoc"})
+
+MAX_REQUEST_BODY_BYTES: int = 64 * 1024   # 64 KB — more than enough for any scan/asset JSON payload
+MAX_URL_LENGTH: int = 2048
+
+# Rate limiter — keyed by client IP
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+
+
+# ---------------------------------------------------------------------------
+# Schemas
+# ---------------------------------------------------------------------------
+
+def _validate_scan_url(v: HttpUrl) -> HttpUrl:
+    url_str = str(v)
+    if len(url_str) > MAX_URL_LENGTH:
+        raise ValueError(f"URL too long (max {MAX_URL_LENGTH} characters)")
+    if v.scheme not in {"http", "https"}:
+        raise ValueError("URL must use http or https scheme")
+    if not v.host:
+        raise ValueError("URL must have a valid hostname")
+    if "#" in url_str:
+        raise ValueError("URL must not contain fragments")
+    return v
+
+
+class ScanRequest(BaseModel):
+    target_url: HttpUrl
+    active_scan: bool = False
+
+    @field_validator("target_url")
+    @classmethod
+    def validate_target_url(cls, v: HttpUrl) -> HttpUrl:
+        return _validate_scan_url(v)
+
+
+class ScanResponse(BaseModel):
+    scan_id: str
+    target_url: str
+    active_scan: bool
+    status: str
+    created_at: str
+
+
+class ScanStatusResponse(BaseModel):
+    scan_id: str
+    target_url: str
+    active_scan: bool
+    status: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+    findings_count: int = 0
+    findings: list[dict[str, Any]] = []
+
+
+class ScanListItem(BaseModel):
+    scan_id: str
+    target_url: str
+    status: str
+    findings_count: int
+    created_at: str
+
+
+class VulnerabilityResponse(BaseModel):
+    vuln_id: str
+    scan_id: str
+    tool: str
+    severity: str
+    title: str
+    description: str | None = None
+    target: str
+    path: str | None = None
+    parameter: str | None = None
+    evidence: str | None = None
+    hash: str
+    first_seen: str
+    last_seen: str
+
+
+class AssetRequest(BaseModel):
+    url: HttpUrl
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: HttpUrl) -> HttpUrl:
+        return _validate_scan_url(v)
+
+
+class AssetResponse(BaseModel):
+    asset_id: str
+    domain: str
+    url: str
+    created_at: str
+    updated_at: str
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    timestamp: str
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def _vuln_to_response(v) -> VulnerabilityResponse:
+    return VulnerabilityResponse(
+        vuln_id=str(v.id), scan_id=str(v.scan_id), tool=v.tool.value,
+        severity=v.severity.value, title=v.title, description=v.description,
+        target=v.target, path=v.path, parameter=v.parameter, evidence=v.evidence,
+        hash=v.hash, first_seen=_iso(v.first_seen), last_seen=_iso(v.last_seen),
+    )
+
+
+def _asset_to_response(a) -> AssetResponse:
+    return AssetResponse(
+        asset_id=str(a.id), domain=a.domain, url=a.url,
+        created_at=_iso(a.created_at), updated_at=_iso(a.updated_at),
+    )
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("VA Platform backend starting up")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    logger.info("VA Platform backend shutting down")
+    await engine.dispose()
+
+
+app = FastAPI(
+    title="VA Automation Platform",
+    description="Web Vulnerability Assessment Automation Platform — REST API",
+    version="0.3.0",
+    lifespan=lifespan,
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def limit_request_body(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": f"Request body too large (max {MAX_REQUEST_BODY_BYTES // 1024} KB)"},
+        )
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    key = request.headers.get("X-API-Key")
+    if not key or key != API_KEY:
+        logger.warning("Rejected request — invalid or missing X-API-Key | path=%s ip=%s", request.url.path, request.client.host)
+        return JSONResponse(status_code=403, content={"detail": "Invalid or missing X-API-Key"})
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Routes — Platform
+# ---------------------------------------------------------------------------
+
+@app.get("/health", response_model=HealthResponse, tags=["Platform"])
+@limiter.exempt
+async def health_check(request: Request) -> HealthResponse:
+    return HealthResponse(status="ok", version=app.version, timestamp=datetime.now(timezone.utc).isoformat())
+
+
+# ---------------------------------------------------------------------------
+# Routes — Scans
+# ---------------------------------------------------------------------------
+
+@app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Scans"])
+@limiter.limit("10/minute")
+async def submit_scan(request: Request, payload: ScanRequest, db: AsyncSession = Depends(get_db)) -> ScanResponse:
+    """Submit a new scan job. Returns scan_id immediately; poll GET /scan/{scan_id} for results."""
+    target_str = str(payload.target_url)
+
+    # Cancel any PENDING/RUNNING scan for the same target so the old task
+    # stops attacking the target and the worker guard discards stale retries.
+    existing = await crud.get_active_scan_for_target(db, target_str)
+    if existing:
+        if existing.celery_task_id:
+            _celery.control.revoke(existing.celery_task_id, terminate=True, signal="SIGTERM")
+            logger.info("Cancelled previous task %s for scan_id=%s", existing.celery_task_id, existing.id)
+        from db.models import ScanStatus
+        await crud.update_scan_status(db, str(existing.id), ScanStatus.FAILED, error="Superseded by new scan submission")
+        logger.info("Marked scan_id=%s FAILED (superseded)", existing.id)
+
+    scan_id    = str(uuid.uuid4())
+    asset      = await crud.get_or_create_asset(db, target_str)
+    scan       = await crud.create_scan(db, scan_id=scan_id, target_url=target_str, active_scan=payload.active_scan, asset_id=str(asset.id))
+    celery_task_id = str(uuid.uuid4())
+    _celery.send_task("worker.celery_app.run_scan", args=[scan_id, target_str, payload.active_scan], queue="scans", task_id=celery_task_id)
+    await crud.set_scan_task_id(db, scan_id, celery_task_id)
+    logger.info("Scan submitted: scan_id=%s task_id=%s target=%s active=%s", scan_id, celery_task_id, target_str, payload.active_scan)
+    return ScanResponse(scan_id=str(scan.id), target_url=scan.target, active_scan=scan.active_scan, status=scan.status.value, created_at=_iso(scan.created_at))
+
+
+@app.get("/scan/{scan_id}", response_model=ScanStatusResponse, tags=["Scans"])
+@limiter.limit("60/minute")
+async def get_scan(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ScanStatusResponse:
+    """Retrieve status and results of a scan by its ID."""
+    scan = await crud.get_scan(db, str(scan_id))
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan {scan_id!r} not found")
+    return ScanStatusResponse(
+        scan_id=str(scan.id), target_url=scan.target, active_scan=scan.active_scan,
+        status=scan.status.value, created_at=_iso(scan.created_at),
+        started_at=_iso(scan.started_at), finished_at=_iso(scan.finished_at),
+        error=scan.error, findings_count=len(scan.vulnerabilities),
+        findings=[v.raw for v in scan.vulnerabilities if v.raw is not None],
+    )
+
+
+@app.delete("/scan/{scan_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Scans"])
+@limiter.limit("30/minute")
+async def delete_scan(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
+    """Delete a scan and all its findings. Revokes the Celery task if still running."""
+    scan = await crud.get_scan_status(db, str(scan_id))
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan {scan_id!r} not found")
+
+    from db.models import ScanStatus
+    if scan.status in (ScanStatus.PENDING, ScanStatus.RUNNING) and scan.celery_task_id:
+        _celery.control.revoke(scan.celery_task_id, terminate=True, signal="SIGTERM")
+        logger.info("Revoked Celery task %s for deleted scan_id=%s", scan.celery_task_id, scan_id)
+
+    await crud.delete_scan(db, str(scan_id))
+    logger.info("Deleted scan_id=%s", scan_id)
+
+
+@app.get("/scans", response_model=list[ScanListItem], tags=["Scans"])
+@limiter.limit("60/minute")
+async def list_scans(
+    request: Request,
+    limit:  Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)]         = 0,
+    db: AsyncSession = Depends(get_db),
+) -> list[ScanListItem]:
+    """List scans newest-first. Use limit/offset for pagination."""
+    scans = await crud.list_scans(db, limit=limit, offset=offset)
+    return [ScanListItem(scan_id=str(s.id), target_url=s.target, status=s.status.value, findings_count=len(s.vulnerabilities), created_at=_iso(s.created_at)) for s in scans]
+
+
+# ---------------------------------------------------------------------------
+# Routes — Vulnerabilities
+# ---------------------------------------------------------------------------
+
+@app.get("/vulnerabilities", response_model=list[VulnerabilityResponse], tags=["Vulnerabilities"])
+@limiter.limit("60/minute")
+async def list_vulnerabilities(
+    request:  Request,
+    scan_id:  Annotated[uuid.UUID | None, Query()] = None,
+    severity: Annotated[str | None, Query(pattern="^(CRITICAL|HIGH|MEDIUM|LOW|INFO)$")] = None,
+    tool:     Annotated[str | None, Query(pattern="^(ZAP|NUCLEI|TESTSSL|NMAP)$")] = None,
+    limit:    Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset:   Annotated[int, Query(ge=0)]          = 0,
+    db: AsyncSession = Depends(get_db),
+) -> list[VulnerabilityResponse]:
+    """List vulnerabilities. Filters: scan_id, severity (CRITICAL|HIGH|MEDIUM|LOW|INFO), tool (ZAP|NUCLEI)."""
+    vulns = await crud.list_vulnerabilities(
+        db,
+        scan_id=str(scan_id) if scan_id else None,
+        severity=severity, tool=tool, limit=limit, offset=offset,
+    )
+    return [_vuln_to_response(v) for v in vulns]
+
+
+@app.get("/vulnerabilities/{vuln_id}", response_model=VulnerabilityResponse, tags=["Vulnerabilities"])
+@limiter.limit("60/minute")
+async def get_vulnerability(request: Request, vuln_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> VulnerabilityResponse:
+    """Fetch a single vulnerability by its UUID."""
+    vuln = await crud.get_vulnerability(db, str(vuln_id))
+    if vuln is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Vulnerability {vuln_id!r} not found")
+    return _vuln_to_response(vuln)
+
+
+# ---------------------------------------------------------------------------
+# Routes — Assets
+# ---------------------------------------------------------------------------
+
+@app.post("/assets", response_model=AssetResponse, status_code=status.HTTP_201_CREATED, tags=["Assets"])
+@limiter.limit("30/minute")
+async def create_asset(request: Request, payload: AssetRequest, db: AsyncSession = Depends(get_db)) -> AssetResponse:
+    """Register a new asset. Returns 409 if URL already exists."""
+    url = str(payload.url)
+    if await crud.get_asset_by_url(db, url):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Asset {url!r} already exists")
+    asset = await crud.create_asset(db, url)
+    logger.info("Asset registered: asset_id=%s url=%s", asset.id, url)
+    return _asset_to_response(asset)
+
+
+@app.get("/assets", response_model=list[AssetResponse], tags=["Assets"])
+@limiter.limit("60/minute")
+async def list_assets(
+    request: Request,
+    limit:   Annotated[int, Query(ge=1, le=500)] = 100,
+    offset:  Annotated[int, Query(ge=0)]         = 0,
+    db: AsyncSession = Depends(get_db),
+) -> list[AssetResponse]:
+    """List all registered assets, newest first."""
+    return [_asset_to_response(a) for a in await crud.list_assets(db, limit=limit, offset=offset)]
+
+
+@app.get("/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
+@limiter.limit("60/minute")
+async def get_asset(request: Request, asset_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> AssetResponse:
+    """Fetch a single asset by its UUID."""
+    asset = await crud.get_asset(db, str(asset_id))
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Asset {asset_id!r} not found")
+    return _asset_to_response(asset)

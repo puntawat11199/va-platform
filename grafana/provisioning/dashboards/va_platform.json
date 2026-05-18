@@ -1,0 +1,334 @@
+{
+  "uid": "va-platform-main",
+  "title": "VA Platform — Scan Overview",
+  "description": "Vulnerability Assessment Platform — scan results, severity breakdown, asset risk.",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "timezone": "browser",
+  "tags": ["va-platform"],
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Scans",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT COUNT(*) AS value FROM scans",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total Findings",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT COUNT(*) AS value FROM vulnerabilities",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Critical / High Findings",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT COUNT(*) AS value FROM vulnerabilities WHERE severity IN ('CRITICAL','HIGH')",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Completed Scans",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT COUNT(*) AS value FROM scans WHERE status = 'COMPLETED'",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 5,
+      "type": "piechart",
+      "title": "Findings by Severity",
+      "gridPos": { "x": 0, "y": 4, "w": 8, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "pieType": "donut",
+        "legendDisplayMode": "table",
+        "legendPlacement": "right"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "CRITICAL" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }] },
+          { "matcher": { "id": "byName", "options": "HIGH" },     "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+          { "matcher": { "id": "byName", "options": "MEDIUM" },   "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byName", "options": "LOW" },      "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byName", "options": "INFO" },     "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "gray" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT severity, COUNT(*) AS count FROM vulnerabilities GROUP BY severity ORDER BY count DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 6,
+      "type": "piechart",
+      "title": "Scans by Status",
+      "gridPos": { "x": 8, "y": 4, "w": 8, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "pieType": "donut",
+        "legendDisplayMode": "table",
+        "legendPlacement": "right"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "COMPLETED" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "FAILED" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "RUNNING" },   "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
+          { "matcher": { "id": "byName", "options": "PENDING" },   "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "gray" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT status, COUNT(*) AS count FROM scans GROUP BY status",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 7,
+      "type": "piechart",
+      "title": "Findings by Scanner",
+      "gridPos": { "x": 16, "y": 4, "w": 8, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "pieType": "donut",
+        "legendDisplayMode": "table",
+        "legendPlacement": "right"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "ZAP" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] },
+          { "matcher": { "id": "byName", "options": "NUCLEI" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "teal" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT tool, COUNT(*) AS count FROM vulnerabilities GROUP BY tool",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Recent Scans",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "sortBy": [{ "displayName": "created_at", "desc": true }],
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "status" }, "properties": [
+            { "id": "custom.width", "value": 100 },
+            { "id": "mappings", "value": [
+              { "type": "value", "options": { "COMPLETED": { "color": "green",  "index": 0 }, "FAILED": { "color": "red", "index": 1 }, "RUNNING": { "color": "blue", "index": 2 }, "PENDING": { "color": "gray", "index": 3 } } }
+            ]},
+            { "id": "custom.displayMode", "value": "color-background" }
+          ]},
+          { "matcher": { "id": "byName", "options": "critical_count" }, "properties": [{ "id": "custom.width", "value": 80 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "dark-red" } }] },
+          { "matcher": { "id": "byName", "options": "high_count" },     "properties": [{ "id": "custom.width", "value": 80 }] },
+          { "matcher": { "id": "byName", "options": "duration_seconds" }, "properties": [{ "id": "unit", "value": "s" }, { "id": "custom.width", "value": 90 }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT scan_id, target, status, total_findings, critical_count, high_count, medium_count, low_count, info_count, duration_seconds, created_at FROM scan_summary ORDER BY created_at DESC LIMIT 25",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Vulnerability Details",
+      "description": "All findings — severity, scanner, target, parameter attacked, evidence. Sorted critical-first.",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 14 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "sortBy": [],
+        "footer": { "show": false },
+        "frameIndex": 0
+      },
+      "fieldConfig": {
+        "defaults": { "custom": { "filterable": true } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "severity" }, "properties": [
+            { "id": "custom.width", "value": 90 },
+            { "id": "mappings", "value": [
+              { "type": "value", "options": {
+                "CRITICAL": { "color": "dark-red",    "index": 0 },
+                "HIGH":     { "color": "orange",      "index": 1 },
+                "MEDIUM":   { "color": "yellow",      "index": 2 },
+                "LOW":      { "color": "blue",        "index": 3 },
+                "INFO":     { "color": "gray",        "index": 4 }
+              }}
+            ]},
+            { "id": "custom.displayMode", "value": "color-background" }
+          ]},
+          { "matcher": { "id": "byName", "options": "tool" },      "properties": [{ "id": "custom.width", "value": 75 }] },
+          { "matcher": { "id": "byName", "options": "title" },     "properties": [{ "id": "custom.width", "value": 280 }] },
+          { "matcher": { "id": "byName", "options": "target" },    "properties": [{ "id": "custom.width", "value": 220 }] },
+          { "matcher": { "id": "byName", "options": "parameter" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "evidence" },  "properties": [{ "id": "custom.width", "value": 300 }] },
+          { "matcher": { "id": "byName", "options": "description" }, "properties": [{ "id": "custom.width", "value": 400 }] },
+          { "matcher": { "id": "byName", "options": "first_seen" }, "properties": [{ "id": "custom.width", "value": 160 }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT\n  v.severity,\n  v.title,\n  v.tool,\n  v.target,\n  v.parameter,\n  v.evidence,\n  v.description,\n  v.first_seen\nFROM vulnerabilities v\nORDER BY\n  CASE v.severity\n    WHEN 'CRITICAL' THEN 0\n    WHEN 'HIGH'     THEN 1\n    WHEN 'MEDIUM'   THEN 2\n    WHEN 'LOW'      THEN 3\n    ELSE 4\n  END,\n  v.first_seen DESC\nLIMIT 500",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Asset Risk Summary",
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 7 },
+      "datasource": { "type": "postgres", "uid": "va_postgres" },
+      "options": {
+        "sortBy": [{ "displayName": "critical_count", "desc": true }],
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "critical_count" }, "properties": [
+            { "id": "custom.width", "value": 100 },
+            { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } },
+            { "id": "custom.displayMode", "value": "color-background" }
+          ]},
+          { "matcher": { "id": "byName", "options": "high_count" }, "properties": [
+            { "id": "custom.width", "value": 100 },
+            { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] } },
+            { "id": "custom.displayMode", "value": "color-background" }
+          ]}
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "postgres", "uid": "va_postgres" },
+        "rawSql": "SELECT domain, url, total_scans, total_findings, critical_count, high_count, last_scanned_at FROM asset_risk_summary ORDER BY critical_count DESC, high_count DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+
+  ]
+}

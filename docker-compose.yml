@@ -1,0 +1,266 @@
+# docker-compose.yml — VA Automation Platform
+# Orchestrates all services: postgres, redis, backend, worker, zap, nuclei, grafana.
+# All services run on a shared bridge network (va-net) for local dev.
+# Secrets and config are injected via .env file (copy from .env.example).
+
+# ---------------------------------------------------------------------------
+# Named volumes — persistent data across container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+  redis_data:
+  grafana_data:
+  zap_data:
+  nuclei_templates:
+  worker_nuclei_templates:
+  reports_data:
+    name: va_reports   # explicit name so testssl docker run can mount it by name
+
+# ---------------------------------------------------------------------------
+# Shared bridge network for local dev
+# ---------------------------------------------------------------------------
+networks:
+  va-net:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # -------------------------------------------------------------------------
+  # 1. PostgreSQL — primary database for scan results and assets
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: va_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-va_platform}
+      POSTGRES_USER: ${DB_USER:-va_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-va_dev_password_2024}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - va-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-va_user} -d ${DB_NAME:-va_platform}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # -------------------------------------------------------------------------
+  # 2. Redis — message broker and result backend for Celery
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: va_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - va-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # -------------------------------------------------------------------------
+  # 3. Backend — FastAPI REST API server
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: va_backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-va_user}:${DB_PASSWORD:-va_dev_password_2024}@postgres:5432/${DB_NAME:-va_platform}
+      REDIS_URL: redis://redis:6379/0
+      ZAP_API_KEY: ${ZAP_API_KEY:-changeme_zap_dev_2024}
+      ZAP_BASE_URL: http://zap:8080
+    # Hot-reload enabled for local dev — remove --reload for production
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend:/app
+      - reports_data:/app/reports
+    ports:
+      - "8000:8000"
+    networks:
+      - va-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # 4. Worker — Celery async task worker for scan jobs
+  # -------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: va_worker
+    restart: unless-stopped
+    # Run as root so the worker can access /var/run/docker.sock (owned root:root on
+    # Docker Desktop for Windows/WSL2 — the GID-based approach only works on Linux).
+    user: "0"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-va_user}:${DB_PASSWORD:-va_dev_password_2024}@postgres:5432/${DB_NAME:-va_platform}
+      REDIS_URL: redis://redis:6379/0
+      ZAP_API_KEY: ${ZAP_API_KEY:-changeme_zap_dev_2024}
+      ZAP_BASE_URL: http://zap:8080
+      NUCLEI_TEMPLATES_PATH: /root/nuclei-templates
+      HOME: /root
+      REPORTS_VOLUME: va_reports
+      TESTSSL_IMAGE: drwetter/testssl.sh:3.2
+    # Update nuclei templates on first start (populates the named volume),
+    # then hand off to Celery. The -silent flag suppresses nuclei banner noise.
+    command: >
+      sh -c "nuclei -update-templates -silent; celery -A celery_app.celery_app worker
+      --loglevel=info --queues=scans --hostname=va-worker@%h"
+    volumes:
+      - ./worker:/app
+      - ./scanner:/app/scanner
+      - ./backend:/app/backend
+      - reports_data:/reports
+      - worker_nuclei_templates:/root/nuclei-templates
+      - /var/run/docker.sock:/var/run/docker.sock  # required for testssl/nmap docker run
+    networks:
+      - va-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # -------------------------------------------------------------------------
+  # 5. Celery Beat — periodic task scheduler
+  #    Shares the same image as the worker; runs beat instead of worker.
+  #    Schedule is defined in worker/celery_app.py beat_schedule.
+  # -------------------------------------------------------------------------
+  beat:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: va_beat
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-va_user}:${DB_PASSWORD:-va_dev_password_2024}@postgres:5432/${DB_NAME:-va_platform}
+      REDIS_URL: redis://redis:6379/0
+      ZAP_API_KEY: ${ZAP_API_KEY:-changeme_zap_dev_2024}
+      ZAP_BASE_URL: http://zap:8080
+      NUCLEI_TEMPLATES_PATH: /home/va/nuclei-templates
+    command: >
+      sh -c "celery -A celery_app.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler"
+    volumes:
+      - ./worker:/app
+      - ./scanner:/app/scanner
+      - ./backend:/app/backend
+    networks:
+      - va-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # -------------------------------------------------------------------------
+  # 6. OWASP ZAP — web vulnerability scanner (daemon mode)
+  #    Exposes REST API on port 8080; worker calls it to trigger scans.
+  #    ZAP_API_KEY must match the key used by backend/worker.
+  # -------------------------------------------------------------------------
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: va_zap
+    restart: unless-stopped
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080
+      -config api.key=${ZAP_API_KEY:-changeme_zap_dev_2024}
+      -config api.addrs.addr.name=.*
+      -config api.addrs.addr.regex=true
+      -config connection.timeoutInSecs=120
+    volumes:
+      - zap_data:/zap/wrk
+      - reports_data:/reports
+    ports:
+      - "8090:8080"   # host 8090 → container 8080 (avoids conflict with existing 8080 usage)
+    networks:
+      - va-net
+    environment:
+      ZAP_API_KEY: ${ZAP_API_KEY:-changeme_zap_dev_2024}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY:-changeme_zap_dev_2024} || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # -------------------------------------------------------------------------
+  # 6. Nuclei — CVE / misconfiguration / exposure scanner
+  #    Runs as a long-lived container; worker exec's scan commands into it.
+  #    Templates are persisted in a named volume and updated on first run.
+  # -------------------------------------------------------------------------
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: va_nuclei
+    restart: unless-stopped
+    # Keep container alive so worker can exec scan commands into it
+    entrypoint: ["sh", "-c", "nuclei -update-templates && tail -f /dev/null"]
+    volumes:
+      - nuclei_templates:/root/nuclei-templates
+      - reports_data:/reports
+    networks:
+      - va-net
+    environment:
+      NUCLEI_TEMPLATES_PATH: /root/nuclei-templates
+
+  # -------------------------------------------------------------------------
+  # 7. Grafana — observability dashboard for scan results
+  #    Uses PostgreSQL as data source (provisioned automatically).
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: va_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin_dev_2024}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+      # Allow embedding in iframes for local dev
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - va-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
