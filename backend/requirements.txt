@@ -34,3 +34,4 @@ tenacity==9.0.0        # retry logic with exponential backoff
 python-jose==3.3.0     # JWT (ready for Phase 8 auth)
 passlib[bcrypt]==1.7.4 # password hashing (ready for Phase 8 auth)
 slowapi==0.1.9         # rate limiting middleware for FastAPI
+fpdf2==2.7.9           # PDF report generation

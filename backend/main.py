@@ -12,7 +12,7 @@ from typing import Annotated, Any
 from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, HttpUrl, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -262,6 +262,25 @@ async def get_scan(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depe
         started_at=_iso(scan.started_at), finished_at=_iso(scan.finished_at),
         error=scan.error, findings_count=len(scan.vulnerabilities),
         findings=[v.raw for v in scan.vulnerabilities if v.raw is not None],
+    )
+
+
+@app.get("/scan/{scan_id}/report.pdf", tags=["Scans"])
+@limiter.limit("10/minute")
+async def download_scan_report(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> Response:
+    """Download a PDF report for a completed scan."""
+    scan = await crud.get_scan(db, str(scan_id))
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan {scan_id!r} not found")
+
+    from pdf_report import generate_scan_pdf
+    pdf_bytes = generate_scan_pdf(scan, scan.vulnerabilities)
+
+    filename = f"va_report_{str(scan_id)[:8]}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

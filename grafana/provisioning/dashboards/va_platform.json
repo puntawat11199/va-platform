@@ -159,7 +159,7 @@
       },
       "targets": [{
         "datasource": { "type": "postgres", "uid": "va_postgres" },
-        "rawSql": "SELECT severity, COUNT(*) AS count FROM vulnerabilities GROUP BY severity ORDER BY count DESC",
+        "rawSql": "SELECT SUM(CASE WHEN severity='CRITICAL' THEN 1 ELSE 0 END) AS \"CRITICAL\", SUM(CASE WHEN severity='HIGH' THEN 1 ELSE 0 END) AS \"HIGH\", SUM(CASE WHEN severity='MEDIUM' THEN 1 ELSE 0 END) AS \"MEDIUM\", SUM(CASE WHEN severity='LOW' THEN 1 ELSE 0 END) AS \"LOW\", SUM(CASE WHEN severity='INFO' THEN 1 ELSE 0 END) AS \"INFO\" FROM vulnerabilities",
         "format": "table",
         "refId": "A"
       }]
@@ -187,7 +187,7 @@
       },
       "targets": [{
         "datasource": { "type": "postgres", "uid": "va_postgres" },
-        "rawSql": "SELECT status, COUNT(*) AS count FROM scans GROUP BY status",
+        "rawSql": "SELECT SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS \"COMPLETED\", SUM(CASE WHEN status='FAILED' THEN 1 ELSE 0 END) AS \"FAILED\", SUM(CASE WHEN status='RUNNING' THEN 1 ELSE 0 END) AS \"RUNNING\", SUM(CASE WHEN status='PENDING' THEN 1 ELSE 0 END) AS \"PENDING\" FROM scans",
         "format": "table",
         "refId": "A"
       }]
@@ -207,13 +207,15 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": [
-          { "matcher": { "id": "byName", "options": "ZAP" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] },
-          { "matcher": { "id": "byName", "options": "NUCLEI" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "teal" } }] }
+          { "matcher": { "id": "byName", "options": "ZAP" },     "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }] },
+          { "matcher": { "id": "byName", "options": "NUCLEI" },  "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "teal" } }] },
+          { "matcher": { "id": "byName", "options": "TESTSSL" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "NMAP" },    "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
         ]
       },
       "targets": [{
         "datasource": { "type": "postgres", "uid": "va_postgres" },
-        "rawSql": "SELECT tool, COUNT(*) AS count FROM vulnerabilities GROUP BY tool",
+        "rawSql": "SELECT SUM(CASE WHEN tool='ZAP' THEN 1 ELSE 0 END) AS \"ZAP\", SUM(CASE WHEN tool='NUCLEI' THEN 1 ELSE 0 END) AS \"NUCLEI\", SUM(CASE WHEN tool='TESTSSL' THEN 1 ELSE 0 END) AS \"TESTSSL\", SUM(CASE WHEN tool='NMAP' THEN 1 ELSE 0 END) AS \"NMAP\" FROM vulnerabilities",
         "format": "table",
         "refId": "A"
       }]
@@ -223,7 +225,7 @@
       "id": 8,
       "type": "table",
       "title": "Recent Scans",
-      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 7 },
       "datasource": { "type": "postgres", "uid": "va_postgres" },
       "options": {
         "sortBy": [{ "displayName": "created_at", "desc": true }],
@@ -257,7 +259,7 @@
       "type": "table",
       "title": "Vulnerability Details",
       "description": "All findings — severity, scanner, target, parameter attacked, evidence. Sorted critical-first.",
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 14 },
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 16 },
       "datasource": { "type": "postgres", "uid": "va_postgres" },
       "options": {
         "sortBy": [],
