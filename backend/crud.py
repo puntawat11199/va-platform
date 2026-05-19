@@ -167,12 +167,30 @@ async def list_scans(
 # Findings normalisation + persistence
 # ---------------------------------------------------------------------------
 
+def _clean(value: str | None) -> str | None:
+    """Strip null bytes that PostgreSQL rejects in text/varchar columns."""
+    if value is None:
+        return None
+    return value.replace("\x00", "")
+
+
+def _clean_raw(obj: Any) -> Any:
+    """Recursively strip null bytes from a raw finding dict before storing as JSONB."""
+    if isinstance(obj, str):
+        return obj.replace("\x00", "")
+    if isinstance(obj, dict):
+        return {k: _clean_raw(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_raw(i) for i in obj]
+    return obj
+
+
 def _normalise_zap(finding: dict[str, Any], scan_id: str) -> Vulnerability:
     """Map a raw ZAP alert dict to a Vulnerability row."""
-    target    = finding.get("url") or finding.get("cweid") or ""
-    title     = finding.get("name") or finding.get("alert") or "Unknown"
-    parameter = finding.get("param") or None
-    evidence  = (finding.get("evidence") or "")[:500] or None
+    target    = _clean(finding.get("url") or finding.get("cweid") or "")
+    title     = _clean(finding.get("name") or finding.get("alert") or "Unknown")
+    parameter = _clean(finding.get("param") or None)
+    evidence  = _clean((finding.get("evidence") or "")[:500] or None)
 
     raw_severity = (finding.get("riskdesc") or finding.get("risk") or "").upper()
     severity = _map_severity_zap(raw_severity)
@@ -182,22 +200,22 @@ def _normalise_zap(finding: dict[str, Any], scan_id: str) -> Vulnerability:
         tool=ScannerTool.ZAP,
         severity=severity,
         title=title,
-        description=finding.get("desc") or finding.get("description") or None,
+        description=_clean(finding.get("desc") or finding.get("description") or None),
         target=target,
-        path=finding.get("uri") or None,
+        path=_clean(finding.get("uri") or None),
         parameter=parameter,
         evidence=evidence,
         hash=_vuln_hash(target, title, parameter, evidence),
-        raw=finding,
+        raw=_clean_raw(finding),
     )
 
 
 def _normalise_nuclei(finding: dict[str, Any], scan_id: str) -> Vulnerability:
     """Map a raw Nuclei finding dict to a Vulnerability row."""
     info      = finding.get("info") or {}
-    target    = finding.get("host") or finding.get("url") or finding.get("matched-at") or ""
-    title     = info.get("name") or finding.get("template-id") or "Unknown"
-    evidence  = (finding.get("extracted-results") or [""])[0][:500] if finding.get("extracted-results") else None
+    target    = _clean(finding.get("host") or finding.get("url") or finding.get("matched-at") or "")
+    title     = _clean(info.get("name") or finding.get("template-id") or "Unknown")
+    evidence  = _clean((finding.get("extracted-results") or [""])[0][:500]) if finding.get("extracted-results") else None
     parameter = None
 
     raw_severity = (info.get("severity") or "").upper()
@@ -208,13 +226,13 @@ def _normalise_nuclei(finding: dict[str, Any], scan_id: str) -> Vulnerability:
         tool=ScannerTool.NUCLEI,
         severity=severity,
         title=title,
-        description=info.get("description") or None,
+        description=_clean(info.get("description") or None),
         target=target,
-        path=finding.get("matched-at") or None,
+        path=_clean(finding.get("matched-at") or None),
         parameter=parameter,
         evidence=evidence,
         hash=_vuln_hash(target, title, parameter, evidence),
-        raw=finding,
+        raw=_clean_raw(finding),
     )
 
 
@@ -248,9 +266,9 @@ def _map_severity_nuclei(severity: str) -> SeverityLevel:
 
 def _normalise_testssl(finding: dict[str, Any], scan_id: str) -> Vulnerability:
     """Map a raw testssl.sh finding dict to a Vulnerability row."""
-    target    = finding.get("ip") or ""
-    title     = finding.get("id") or "Unknown"
-    evidence  = (finding.get("finding") or "")[:500] or None
+    target    = _clean(finding.get("ip") or "")
+    title     = _clean(finding.get("id") or "Unknown")
+    evidence  = _clean((finding.get("finding") or "")[:500] or None)
     parameter = None
 
     raw_severity = (finding.get("severity") or "").upper()
@@ -261,13 +279,13 @@ def _normalise_testssl(finding: dict[str, Any], scan_id: str) -> Vulnerability:
         tool=ScannerTool.TESTSSL,
         severity=severity,
         title=title,
-        description=finding.get("finding") or None,
+        description=_clean(finding.get("finding") or None),
         target=target,
         path=None,
         parameter=parameter,
         evidence=evidence,
         hash=_vuln_hash(target, title, parameter, evidence),
-        raw=finding,
+        raw=_clean_raw(finding),
     )
 
 
@@ -287,9 +305,9 @@ def _normalise_nmap(finding: dict[str, Any], scan_id: str) -> Vulnerability:
     target    = finding.get("target") or finding.get("ip") or ""
     port      = finding.get("port", 0)
     protocol  = finding.get("protocol", "tcp").upper()
-    service   = finding.get("service", "unknown")
+    service   = _clean(finding.get("service", "unknown"))
     title     = f"Open {protocol} port {port}/{service}"
-    evidence  = (finding.get("finding") or "")[:500] or None
+    evidence  = _clean((finding.get("finding") or "")[:500] or None)
     parameter = str(port) if port else None
 
     raw_severity = (finding.get("severity") or "").upper()
@@ -300,13 +318,13 @@ def _normalise_nmap(finding: dict[str, Any], scan_id: str) -> Vulnerability:
         tool=ScannerTool.NMAP,
         severity=severity,
         title=title,
-        description=finding.get("finding") or None,
+        description=_clean(finding.get("finding") or None),
         target=target,
         path=None,
         parameter=parameter,
         evidence=evidence,
         hash=_vuln_hash(target, title, parameter, evidence),
-        raw=finding,
+        raw=_clean_raw(finding),
     )
 
 

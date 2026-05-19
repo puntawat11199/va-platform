@@ -44,13 +44,14 @@ def build_testssl_command(target: str, output_file: str) -> list[str]:
     """
     return [
         "docker", "run", "--rm",
+        "--user", "root",           # run as root so it can write to the root-owned reports volume
         "-v", f"{REPORTS_VOLUME}:/reports",
         TESTSSL_IMAGE,
         "--jsonfile", output_file,
-        "--color",    "0",      # no ANSI colour codes
-        "--warnings", "batch",  # non-interactive, suppress prompts
-        "-q",                   # quiet — suppress banner
-        "--ip",       "one",    # only test first resolved IP (faster)
+        "--color",    "0",          # no ANSI colour codes
+        "--warnings", "batch",      # non-interactive, suppress prompts
+        "-q",                       # quiet — suppress banner
+        "--ip",       "one",        # only test first resolved IP (faster)
         target,
     ]
 

@@ -220,10 +220,10 @@ async def custom_docs() -> HTMLResponse:
     )
     html = base.body.decode("utf-8")
 
-    # Inject the plugin function definition INSIDE the init script block,
-    # right before SwaggerUIBundle({...}) is called, so it's in scope.
+    # Plugin receives `system` so it can read authorized API key from auth state.
+    # X-API-Key lives in system.authSelectors.authorized(), not in req.get("headers").
     plugin_fn = """
-  function InvokeWebRequestPlugin() {
+  function InvokeWebRequestPlugin(system) {
     return {
       fn: {
         requestSnippetGenerator_invoke_webrequest: function(req) {
@@ -231,16 +231,36 @@ async def custom_docs() -> HTMLResponse:
           var method = (req.get("method") || "GET").toUpperCase();
           var hdrs   = req.get("headers");
           var body   = req.get("body");
-          var parts  = [];
+
+          // Collect headers from request object
+          var hMap = {};
+          if (hdrs && hdrs.size > 0) {
+            hdrs.entrySeq().forEach(function(e) { hMap[e[0]] = e[1]; });
+          }
+
+          // Pull API key from Swagger UI auth state (set via Authorize button)
+          try {
+            var authorized = system.authSelectors.authorized();
+            if (authorized && authorized.size > 0) {
+              authorized.forEach(function(auth) {
+                var schema = auth.get("schema");
+                if (schema && schema.get("type") === "apiKey" && schema.get("in") === "header") {
+                  hMap[schema.get("name")] = auth.get("value");
+                }
+              });
+            }
+          } catch(e) {}
+
+          var parts = [];
           parts.push('Invoke-WebRequest -Uri "' + url + '"');
           parts.push("-Method " + method);
-          if (hdrs && hdrs.size > 0) {
-            var hp = [];
-            hdrs.entrySeq().forEach(function(e) {
-              hp.push('"' + e[0] + '"="' + e[1] + '"');
-            });
+
+          var keys = Object.keys(hMap);
+          if (keys.length > 0) {
+            var hp = keys.map(function(k) { return '"' + k + '"="' + hMap[k] + '"'; });
             parts.push("-Headers @{" + hp.join("; ") + "}");
           }
+
           if (body) {
             var b = (typeof body === "string") ? body : JSON.stringify(body, null, 2);
             parts.push("-Body '" + b.replace(/'/g, "''") + "'");

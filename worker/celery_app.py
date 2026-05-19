@@ -223,15 +223,22 @@ def run_scan(self, scan_id: str, target_url: str, active_scan: bool = False) -> 
         nuclei_findings = run_nuclei_scan(scan_id=scan_id, target_url=target_url)
         logger.info("run_scan | scan_id=%s nuclei_findings=%d", scan_id, len(nuclei_findings))
 
-        # --- testssl.sh (HTTPS targets only) ---
+        # --- testssl.sh (HTTPS targets only) — non-fatal ---
         from scanner.testssl_runner import run_testssl_scan
-        testssl_findings = run_testssl_scan(scan_id=scan_id, target_url=target_url)
-        logger.info("run_scan | scan_id=%s testssl_findings=%d", scan_id, len(testssl_findings))
+        try:
+            testssl_findings = run_testssl_scan(scan_id=scan_id, target_url=target_url)
+            logger.info("run_scan | scan_id=%s testssl_findings=%d", scan_id, len(testssl_findings))
+        except Exception as testssl_exc:
+            logger.warning("run_scan | scan_id=%s testssl failed (non-fatal): %s", scan_id, testssl_exc)
+            testssl_findings = []
 
-        # --- nmap ---
+        # --- nmap — non-fatal ---
         from scanner.nmap_runner import run_nmap_scan
-        nmap_findings = run_nmap_scan(scan_id=scan_id, target_url=target_url)
-        logger.info("run_scan | scan_id=%s nmap_findings=%d", scan_id, len(nmap_findings))
+        try:
+            nmap_findings = run_nmap_scan(scan_id=scan_id, target_url=target_url)
+            logger.info("run_scan | scan_id=%s nmap_findings=%d", scan_id, len(nmap_findings))
+        except Exception as nmap_exc:
+            logger.warning("run_scan | scan_id=%s nmap failed (non-fatal): %s", scan_id, nmap_exc)
 
         # --- Persist ---
         saved = asyncio.run(_db_save_findings(scan_id, zap_findings, nuclei_findings, testssl_findings, nmap_findings))

@@ -66,6 +66,9 @@ def build_nuclei_command(
         "-rate-limit", str(NUCLEI_RATE_LIMIT),
         "-bulk-size", str(NUCLEI_BULK_SIZE),
         "-concurrency", str(NUCLEI_CONCURRENCY),
+        "-ni",                          # disable interactsh (prevents OAST templates marking target as unresponsive)
+        "-nh",                          # disable redirects that probe external hosts
+        "-exclude-id", "hpe-autopass-panel,apachespark-ui-exposed,apache-kyuubi-config",  # probe non-standard ports, create malformed URLs against non-80/443 targets
     ]
 
     logger.debug("nuclei command: %s", " ".join(cmd))
