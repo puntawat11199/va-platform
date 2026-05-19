@@ -257,7 +257,7 @@ Open `.env` in any text editor and review the values. For local development the 
 
 ```ini
 # Change these before any non-local use:
-API_KEY=changeme_api_key_dev_2024        # API key for all requests
+API_KEY=your_api_key_here        # API key for all requests
 ZAP_API_KEY=changeme_zap_dev_2024        # ZAP internal API key
 DB_PASSWORD=va_dev_password_2024         # PostgreSQL password
 GRAFANA_PASSWORD=admin_dev_2024          # Grafana admin password
@@ -304,7 +304,7 @@ All configuration lives in `.env`. Key variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `API_KEY` | `changeme_api_key_dev_2024` | Required `X-API-Key` header for all API requests |
+| `API_KEY` | `your_api_key_here` | Required `X-API-Key` header for all API requests |
 | `DB_PASSWORD` | `va_dev_password_2024` | PostgreSQL password |
 | `ZAP_API_KEY` | `changeme_zap_dev_2024` | ZAP REST API authentication key |
 | `GRAFANA_PASSWORD` | `admin_dev_2024` | Grafana admin password |
@@ -405,44 +405,77 @@ Expected output:
 | Service | URL | Credentials |
 |---------|-----|-------------|
 | **REST API** | http://localhost:8000 | `X-API-Key: <your API_KEY>` header |
-| **API Docs (Swagger)** | http://localhost:8000/docs | No auth required |
+| **API Docs (Swagger)** | http://localhost:8000/docs | No auth required to open |
+| **ReDoc** | http://localhost:8000/redoc | No auth required |
 | **Grafana Dashboard** | http://localhost:3000 | admin / `<your GRAFANA_PASSWORD>` |
 | **ZAP API** (debug) | http://localhost:8090 | ZAP_API_KEY in URL |
+
+### Using the Swagger UI (easiest way to test — works on Windows without curl)
+
+1. Open [http://localhost:8000/docs](http://localhost:8000/docs)
+2. Click the **Authorize** button (top-right, green padlock icon)
+3. Enter your API key (value of `API_KEY` from your `.env`) → click **Authorize** → **Close**
+4. Expand any endpoint, click **Try it out** → fill in parameters → **Execute**
+5. After executing, the **Snippets** section below the response shows three copy-ready command formats:
+
+| Tab | Use when |
+|-----|---------|
+| **cURL (Linux/Mac)** | Linux terminal or macOS |
+| **cURL (Windows CMD)** | Windows Command Prompt with curl installed |
+| **Invoke-WebRequest (PS)** | Windows PowerShell — no curl needed |
 
 ---
 
 ## 10. Submitting Your First Scan
 
+Replace `<YOUR_API_KEY>` with the value of `API_KEY` in your `.env` file.
+
+> **Tip:** Use the Swagger UI at http://localhost:8000/docs — click **Authorize**, enter your key once, then use **Try it out** on any endpoint. It generates `Invoke-WebRequest` commands automatically.
+
 ### Windows (PowerShell)
 
 ```powershell
-# Passive scan (safe — no attack payloads sent)
-$body = '{"target_url": "http://host.docker.internal:5000/", "active_scan": false}'
-$headers = @{"X-API-Key" = "changeme_api_key_dev_2024"; "Content-Type" = "application/json"}
-Invoke-WebRequest -Method POST -Uri "http://localhost:8000/scan" -Body $body -Headers $headers
+$KEY = "your_api_key_here"   # value from your .env API_KEY
+$BASE = "http://localhost:8000"
+$headers = @{"X-API-Key" = $KEY; "Content-Type" = "application/json"}
 
-# Active scan (sends attack payloads — only use against targets you own)
-$body = '{"target_url": "http://host.docker.internal:5000/", "active_scan": true}'
-Invoke-WebRequest -Method POST -Uri "http://localhost:8000/scan" -Body $body -Headers $headers
+# Submit a passive scan (safe — no attack payloads)
+$response = Invoke-WebRequest -Method POST -Uri "$BASE/scan" -Headers $headers `
+  -Body '{"target_url": "http://host.docker.internal:5000", "active_scan": false}'
+$scan = $response.Content | ConvertFrom-Json
+$scanId = $scan.scan_id
+Write-Host "Scan ID: $scanId"
+
+# Submit an active scan (sends attack payloads — only use against targets you own)
+Invoke-WebRequest -Method POST -Uri "$BASE/scan" -Headers $headers `
+  -Body '{"target_url": "http://host.docker.internal:5000", "active_scan": true}'
+
+# Check scan status
+Invoke-WebRequest -Uri "$BASE/scan/$scanId" -Headers @{"X-API-Key" = $KEY}
+
+# List all scans
+Invoke-WebRequest -Uri "$BASE/scans" -Headers @{"X-API-Key" = $KEY}
 ```
 
 ### Linux
 
 ```bash
-# Passive scan
-curl -s -X POST http://localhost:8000/scan \
-  -H "X-API-Key: changeme_api_key_dev_2024" \
-  -H "Content-Type: application/json" \
-  -d '{"target_url": "https://example.com", "active_scan": false}' | python3 -m json.tool
+KEY="your_api_key_here"   # value from your .env API_KEY
+BASE="http://localhost:8000"
 
-# Check scan status (replace <scan_id> with ID from response above)
-curl -s http://localhost:8000/scan/<scan_id> \
-  -H "X-API-Key: changeme_api_key_dev_2024" | python3 -m json.tool
+# Submit a passive scan
+curl -s -X POST "$BASE/scan" \
+  -H "X-API-Key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"target_url": "http://example.com", "active_scan": false}'
+
+# Check scan status
+curl -s "$BASE/scan/<scan_id>" -H "X-API-Key: $KEY"
 ```
 
 ### Polling for results
 
-The scan runs asynchronously. Poll `GET /scan/{scan_id}` until `status` is `COMPLETED` or `FAILED`. Typical scan durations:
+The scan runs asynchronously. Poll `GET /scan/{scan_id}` until `status` is `COMPLETED` or `FAILED`.
 
 | Scan type | Expected duration |
 |-----------|------------------|
@@ -451,32 +484,54 @@ The scan runs asynchronously. Poll `GET /scan/{scan_id}` until `status` is `COMP
 
 ### View findings
 
-```bash
-# All findings for a scan
-curl -s "http://localhost:8000/vulnerabilities?scan_id=<scan_id>" \
-  -H "X-API-Key: changeme_api_key_dev_2024"
+```powershell
+# Windows — all findings for a scan
+Invoke-WebRequest -Uri "$BASE/vulnerabilities?scan_id=$scanId" -Headers @{"X-API-Key" = $KEY}
 
-# Only HIGH and CRITICAL findings
-curl -s "http://localhost:8000/vulnerabilities?severity=HIGH" \
-  -H "X-API-Key: changeme_api_key_dev_2024"
+# Only CRITICAL findings
+Invoke-WebRequest -Uri "$BASE/vulnerabilities?severity=CRITICAL" -Headers @{"X-API-Key" = $KEY}
 
 # Findings from nmap only
-curl -s "http://localhost:8000/vulnerabilities?tool=NMAP" \
-  -H "X-API-Key: changeme_api_key_dev_2024"
+Invoke-WebRequest -Uri "$BASE/vulnerabilities?tool=NMAP" -Headers @{"X-API-Key" = $KEY}
 ```
-
-### Delete a scan
 
 ```bash
 # Linux
-curl -s -X DELETE http://localhost:8000/scan/<scan_id> \
-  -H "X-API-Key: changeme_api_key_dev_2024" -w "%{http_code}"
-# Returns 204 on success
+curl -s "$BASE/vulnerabilities?scan_id=<scan_id>" -H "X-API-Key: $KEY"
+curl -s "$BASE/vulnerabilities?severity=CRITICAL" -H "X-API-Key: $KEY"
+```
 
-# Windows PowerShell
-(Invoke-WebRequest -Method DELETE `
-  -Uri "http://localhost:8000/scan/<scan_id>" `
-  -Headers @{"X-API-Key"="changeme_api_key_dev_2024"}).StatusCode
+### Download PDF report
+
+```powershell
+# Windows — saves to report.pdf in current directory
+Invoke-WebRequest -Uri "$BASE/scan/$scanId/report.pdf" `
+  -Headers @{"X-API-Key" = $KEY} `
+  -OutFile "report.pdf"
+Write-Host "Saved to report.pdf"
+```
+
+```bash
+# Linux
+curl -s "$BASE/scan/<scan_id>/report.pdf" -H "X-API-Key: $KEY" -o report.pdf
+```
+
+The PDF contains:
+- **Cover page** — target, scan ID, status, duration
+- **Executive summary** — finding counts by severity + bar chart + breakdown by scanner
+- **Findings table** — all vulnerabilities sorted critical-first with colour coding
+
+### Delete a scan
+
+```powershell
+# Windows — also cancels the Celery task if scan is still running
+Invoke-WebRequest -Uri "$BASE/scan/$scanId" -Method DELETE -Headers @{"X-API-Key" = $KEY}
+# Returns HTTP 204 on success
+```
+
+```bash
+# Linux
+curl -s -X DELETE "$BASE/scan/<scan_id>" -H "X-API-Key: $KEY" -w "%{http_code}"
 ```
 
 ---
@@ -577,27 +632,35 @@ docker exec va_nuclei ls /root/nuclei-templates | head -5
 
 ---
 
-### Worker can't connect to Docker socket (testssl/nmap fail)
+### Worker can't connect to Docker socket (testssl/nmap fail with exit code 126)
 
-The worker needs access to the Docker socket to run testssl.sh and nmap as containers.
+The worker runs testssl.sh and nmap as short-lived Docker containers via the Docker socket.
 
-**Linux:** The socket is `/var/run/docker.sock`. Ensure the `va` user inside the container has access. The Dockerfile adds it to GID 999 (`docker-host` group). If the Docker socket on your host has a different GID:
+**Windows / Docker Desktop:** The socket (`/var/run/docker.sock`) is owned by `root:root` (GID 0). The worker is configured to run as root (`user: "0"` in `docker-compose.yml`) to have access. If you see "permission denied" errors:
+
+```powershell
+# Verify worker is running as root
+docker exec va_worker id
+# Expected: uid=0(root) gid=0(root)
+
+# Restart the worker
+docker restart va_worker
+```
+
+**Linux (Docker Engine):** The socket is typically owned by the `docker` group (GID 999). If your system uses a different GID:
 
 ```bash
 # Check the GID of your Docker socket
-ls -la /var/run/docker.sock
-# e.g.: srw-rw---- 1 root docker 0 ... /var/run/docker.sock
-
-# Get the GID number
 stat -c '%g' /var/run/docker.sock
-```
 
-If the GID is not 999, update the Dockerfile `groupadd` line to match and rebuild:
-```dockerfile
-&& groupadd -g <YOUR_GID> docker-host 2>/dev/null || true \
-```
+# If not 999, either:
+# Option A — run worker as root (same as Windows, simplest):
+#   Set user: "0" in docker-compose.yml under the worker service
 
-**Windows / Docker Desktop:** The Docker socket is proxied by Docker Desktop, so GID issues don't apply.
+# Option B — keep non-root: update the Dockerfile groupadd line to match your GID:
+# && groupadd -g <YOUR_GID> docker-host 2>/dev/null || true \
+# then rebuild: docker compose build worker
+```
 
 ---
 

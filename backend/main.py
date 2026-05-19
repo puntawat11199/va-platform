@@ -12,7 +12,8 @@ from typing import Annotated, Any
 from celery import Celery
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, HttpUrl, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -179,7 +180,94 @@ app = FastAPI(
     description="Web Vulnerability Assessment Automation Platform — REST API",
     version="0.3.0",
     lifespan=lifespan,
+    docs_url=None,   # disabled — replaced by custom /docs below
 )
+
+
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+    }
+    schema["security"] = [{"ApiKeyAuth": []}]
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = _custom_openapi
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_docs() -> HTMLResponse:
+    base = get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="VA Automation Platform — API Docs",
+        swagger_ui_parameters={
+            "requestSnippetsEnabled": True,
+            "requestSnippets": {
+                "generators": {
+                    "curl_bash":         {"title": "cURL (Linux/Mac)",       "syntax": "bash"},
+                    "curl_powershell":   {"title": "cURL (Windows CMD)",     "syntax": "powershell"},
+                    "invoke_webrequest": {"title": "Invoke-WebRequest (PS)", "syntax": "powershell"},
+                },
+                "defaultExpanded": True,
+                "languages": None,
+            },
+        },
+    )
+    html = base.body.decode("utf-8")
+
+    # Inject the plugin function definition INSIDE the init script block,
+    # right before SwaggerUIBundle({...}) is called, so it's in scope.
+    plugin_fn = """
+  function InvokeWebRequestPlugin() {
+    return {
+      fn: {
+        requestSnippetGenerator_invoke_webrequest: function(req) {
+          var url    = req.get("url");
+          var method = (req.get("method") || "GET").toUpperCase();
+          var hdrs   = req.get("headers");
+          var body   = req.get("body");
+          var parts  = [];
+          parts.push('Invoke-WebRequest -Uri "' + url + '"');
+          parts.push("-Method " + method);
+          if (hdrs && hdrs.size > 0) {
+            var hp = [];
+            hdrs.entrySeq().forEach(function(e) {
+              hp.push('"' + e[0] + '"="' + e[1] + '"');
+            });
+            parts.push("-Headers @{" + hp.join("; ") + "}");
+          }
+          if (body) {
+            var b = (typeof body === "string") ? body : JSON.stringify(body, null, 2);
+            parts.push("-Body '" + b.replace(/'/g, "''") + "'");
+          }
+          return parts.join(" `\\n  ");
+        }
+      }
+    };
+  }
+"""
+    # Insert the function definition just before "const ui = SwaggerUIBundle("
+    # Inject plugin function definition before the SwaggerUIBundle call
+    html = html.replace(
+        "const ui = SwaggerUIBundle(",
+        plugin_fn + "    const ui = SwaggerUIBundle(",
+        1,
+    )
+
+    # Inject plugins array into the SwaggerUIBundle config (before presets:)
+    html = html.replace(
+        "\n    presets: [",
+        "\n    plugins: [InvokeWebRequestPlugin],\n    presets: [",
+        1,
+    )
+
+    return HTMLResponse(html)
+
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

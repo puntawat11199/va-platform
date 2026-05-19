@@ -1,6 +1,8 @@
 # VA Automation Platform
 
-A Web Vulnerability Assessment (VA) Automation Platform that orchestrates OWASP ZAP and Nuclei scans via a REST API, processes results asynchronously with Celery, stores findings in PostgreSQL, and visualises them in Grafana.
+A self-hosted Web Vulnerability Assessment (VA) platform that orchestrates **OWASP ZAP**, **Nuclei**, **testssl.sh**, and **nmap** scans via a REST API, processes results asynchronously with Celery, stores findings in PostgreSQL, and visualises them in a Grafana dashboard.
+
+**Current version:** `0.3.0`
 
 ---
 
@@ -12,40 +14,40 @@ A Web Vulnerability Assessment (VA) Automation Platform that orchestrates OWASP 
 └─────────────┘                     └────────┬────────┘
                                              │ enqueue
                                     ┌────────▼────────┐
-                                    │  Redis (6379)   │
-                                    └────────┬────────┘
+                                    │  Redis (6379)   │◀── Celery Beat
+                                    └────────┬────────┘    (scheduler)
                                              │ consume
-                                    ┌────────▼────────┐
-                                    │  Celery Worker  │
-                                    └──┬──────────┬───┘
-                                       │          │
-                              ┌────────▼──┐  ┌────▼───────┐
-                              │ ZAP (8080)│  │   Nuclei   │
-                              └────────┬──┘  └────┬───────┘
-                                       │          │
-                                    ┌──▼──────────▼──┐
-                                    │  PostgreSQL    │
-                                    │    (5432)      │
-                                    └────────┬───────┘
-                                             │
-                                    ┌────────▼───────┐
-                                    │ Grafana (3000) │
-                                    └────────────────┘
+                                    ┌────────▼────────────────────────┐
+                                    │        Celery Worker            │
+                                    │  1. ZAP runner   (web vulns)    │
+                                    │  2. Nuclei runner (CVEs/misconf)│
+                                    │  3. testssl runner (TLS/SSL)    │
+                                    │  4. nmap runner  (open ports)   │
+                                    └──────────────┬──────────────────┘
+                                                   │
+                                    ┌──────────────▼──────────────────┐
+                                    │         PostgreSQL (5432)       │
+                                    └──────────────┬──────────────────┘
+                                                   │
+                                    ┌──────────────▼──────────────────┐
+                                    │        Grafana (3000)           │
+                                    └─────────────────────────────────┘
 ```
 
 ---
 
 ## Services
 
-| Service    | Image                              | Port | Description                     |
-|------------|------------------------------------|------|---------------------------------|
-| `backend`  | local build                        | 8000 | FastAPI REST API                |
-| `worker`   | local build                        | —    | Celery async scan worker        |
-| `postgres` | postgres:15-alpine                 | 5432 | Primary database                |
-| `redis`    | redis:7-alpine                     | 6379 | Celery broker + result backend  |
-| `zap`      | ghcr.io/zaproxy/zaproxy:stable     | 8080 | OWASP ZAP daemon                |
-| `nuclei`   | projectdiscovery/nuclei:latest     | —    | CVE / misconfiguration scanner  |
-| `grafana`  | grafana/grafana:latest             | 3000 | Vulnerability dashboard         |
+| Service    | Image                              | Port | Description                              |
+|------------|------------------------------------|------|------------------------------------------|
+| `backend`  | local build                        | 8000 | FastAPI REST API                         |
+| `worker`   | local build                        | —    | Celery async scan worker (4 scanners)    |
+| `beat`     | local build                        | —    | Celery Beat — scheduled rescans          |
+| `postgres` | postgres:15-alpine                 | 5432 | Primary database                         |
+| `redis`    | redis:7-alpine                     | 6379 | Celery broker + result backend           |
+| `zap`      | ghcr.io/zaproxy/zaproxy:stable     | 8090 | OWASP ZAP daemon (host 8090→8080)        |
+| `nuclei`   | projectdiscovery/nuclei:latest     | —    | CVE / misconfiguration scanner           |
+| `grafana`  | grafana/grafana:latest             | 3000 | Vulnerability dashboard                  |
 
 ---
 
@@ -54,6 +56,8 @@ A Web Vulnerability Assessment (VA) Automation Platform that orchestrates OWASP 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Windows/Mac) or Docker Engine + Compose v2 (Linux)
 - Git
 
+See [how_to_install.md](how_to_install.md) for full step-by-step instructions on both Windows and Linux.
+
 ---
 
 ## Quick Start
@@ -61,19 +65,22 @@ A Web Vulnerability Assessment (VA) Automation Platform that orchestrates OWASP 
 ### 1. Clone the repository
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/puntawat11199/va-platform.git
 cd va-platform
 ```
 
 ### 2. Configure environment
 
+**Windows:**
+```powershell
+Copy-Item .env.example .env
+```
+**Linux:**
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` if you want to change any defaults. The dev defaults work out of the box.
-
-> **Important:** Change `ZAP_API_KEY` and `SECRET_KEY` before exposing this platform on any network.
+Edit `.env` — at minimum change `API_KEY`, `ZAP_API_KEY`, and `DB_PASSWORD` before any non-local use.
 
 ### 3. Start the stack
 
@@ -81,7 +88,7 @@ Edit `.env` if you want to change any defaults. The dev defaults work out of the
 docker compose up -d
 ```
 
-First run pulls all images and builds the backend/worker containers — this takes a few minutes.
+First run pulls all images and builds containers — takes 5–10 minutes. ZAP needs ~60s to load.
 
 ### 4. Verify all services are healthy
 
@@ -89,71 +96,145 @@ First run pulls all images and builds the backend/worker containers — this tak
 docker compose ps
 ```
 
-All services should show `healthy` or `running`. ZAP takes ~60 seconds to fully start.
+All services should show `healthy` or `running`.
 
 ### 5. Check the API
 
-```bash
-curl http://localhost:8000/health
+```powershell
+# Windows
+(Invoke-WebRequest -Uri "http://localhost:8000/health").Content
+
+# Linux
+curl -s http://localhost:8000/health
 ```
 
-Expected response:
-```json
-{"status": "ok", "version": "0.1.0", "timestamp": "..."}
-```
+Expected: `{"status":"ok","version":"0.3.0","timestamp":"..."}`
 
 ### 6. Open the dashboard
 
-Navigate to [http://localhost:3000](http://localhost:3000) and log in with:
-- Username: `admin`
-- Password: `admin_dev_2024` (or your `GRAFANA_PASSWORD` value)
+Go to [http://localhost:3000](http://localhost:3000) — login: `admin` / `admin_dev_2024`
 
 ---
 
 ## API Usage
 
+All endpoints (except `/health`, `/docs`, `/redoc`) require the `X-API-Key` header.
+
+### Using Swagger UI (easiest — browser, no curl needed)
+
+1. Open [http://localhost:8000/docs](http://localhost:8000/docs)
+2. Click the **Authorize** button (top right)
+3. Enter your API key from `.env` → click **Authorize**
+4. Use **Try it out** on any endpoint — the key is sent automatically
+5. After executing, the **Snippets** section shows ready-to-copy commands in three formats:
+   - `cURL (Linux/Mac)`
+   - `cURL (Windows CMD)`
+   - `Invoke-WebRequest (PS)` — native PowerShell, no curl needed
+
 ### Submit a scan
 
+**Windows (PowerShell):**
+```powershell
+$headers = @{"X-API-Key" = "your_api_key"; "Content-Type" = "application/json"}
+
+# Passive scan (safe — no attack payloads)
+Invoke-WebRequest -Uri "http://localhost:8000/scan" `
+  -Method POST `
+  -Headers $headers `
+  -Body '{"target_url": "http://host.docker.internal:5000", "active_scan": false}'
+
+# Active scan (sends attack payloads — only use on targets you own)
+Invoke-WebRequest -Uri "http://localhost:8000/scan" `
+  -Method POST `
+  -Headers $headers `
+  -Body '{"target_url": "http://host.docker.internal:5000", "active_scan": true}'
+```
+
+**Linux:**
 ```bash
-curl -X POST http://localhost:8000/scan \
+curl -s -X POST http://localhost:8000/scan \
+  -H "X-API-Key: your_api_key" \
   -H "Content-Type: application/json" \
-  -d '{
-    "target_url": "http://testphp.vulnweb.com",
-    "active_scan": false
-  }'
+  -d '{"target_url": "http://example.com", "active_scan": false}'
 ```
-
-Response:
-```json
-{
-  "scan_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "target_url": "http://testphp.vulnweb.com",
-  "active_scan": false,
-  "status": "PENDING",
-  "created_at": "2026-05-15T10:00:00"
-}
-```
-
-> Set `"active_scan": true` to include ZAP active scanning.
-> **Only scan targets you own or have written permission to test.**
 
 ### Poll scan status
 
+```powershell
+# Windows
+Invoke-WebRequest -Uri "http://localhost:8000/scan/<scan_id>" `
+  -Headers @{"X-API-Key" = "your_api_key"}
+```
 ```bash
-curl http://localhost:8000/scan/3fa85f64-5717-4562-b3fc-2c963f66afa6
+# Linux
+curl -s http://localhost:8000/scan/<scan_id> -H "X-API-Key: your_api_key"
 ```
 
-### List all scans
+Poll until `"status"` is `"COMPLETED"` or `"FAILED"`. Typical durations:
 
+| Scan type | Duration |
+|-----------|----------|
+| Passive only | 2–5 min |
+| Active scan | 5–20 min |
+
+### Download PDF report
+
+```powershell
+# Windows — saves PDF to disk
+Invoke-WebRequest -Uri "http://localhost:8000/scan/<scan_id>/report.pdf" `
+  -Headers @{"X-API-Key" = "your_api_key"} `
+  -OutFile "report.pdf"
+```
 ```bash
-curl http://localhost:8000/scans
+# Linux
+curl -s "http://localhost:8000/scan/<scan_id>/report.pdf" \
+  -H "X-API-Key: your_api_key" -o report.pdf
 ```
 
-### Interactive API docs
+### List vulnerabilities
 
-FastAPI auto-generates docs at:
-- Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
-- ReDoc: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+```powershell
+# Windows — all findings for a scan
+Invoke-WebRequest -Uri "http://localhost:8000/vulnerabilities?scan_id=<scan_id>" `
+  -Headers @{"X-API-Key" = "your_api_key"}
+
+# Filter by severity or tool
+Invoke-WebRequest -Uri "http://localhost:8000/vulnerabilities?severity=CRITICAL" `
+  -Headers @{"X-API-Key" = "your_api_key"}
+Invoke-WebRequest -Uri "http://localhost:8000/vulnerabilities?tool=NMAP" `
+  -Headers @{"X-API-Key" = "your_api_key"}
+```
+
+### Delete a scan
+
+```powershell
+# Windows
+Invoke-WebRequest -Uri "http://localhost:8000/scan/<scan_id>" `
+  -Method DELETE `
+  -Headers @{"X-API-Key" = "your_api_key"}
+# Returns HTTP 204 on success. Cancels the Celery task if still running.
+```
+```bash
+# Linux
+curl -s -X DELETE http://localhost:8000/scan/<scan_id> \
+  -H "X-API-Key: your_api_key" -w "%{http_code}"
+```
+
+### Full API reference
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Platform health check (no auth) |
+| `POST` | `/scan` | Submit a new scan job |
+| `GET` | `/scan/{id}` | Get scan status + findings |
+| `DELETE` | `/scan/{id}` | Delete scan (revokes task if running) |
+| `GET` | `/scan/{id}/report.pdf` | Download PDF report |
+| `GET` | `/scans` | List all scans (paginated) |
+| `GET` | `/vulnerabilities` | List findings (filter by scan/severity/tool) |
+| `GET` | `/vulnerabilities/{id}` | Get single vulnerability |
+| `POST` | `/assets` | Register a target asset |
+| `GET` | `/assets` | List registered assets |
+| `GET` | `/assets/{id}` | Get single asset |
 
 ---
 
@@ -162,46 +243,31 @@ FastAPI auto-generates docs at:
 ### View logs
 
 ```bash
-# All services
-docker compose logs -f
-
-# Single service
-docker compose logs -f backend
-docker compose logs -f worker
-docker compose logs -f zap
+docker compose logs -f           # all services
+docker compose logs -f worker    # worker only
+docker compose logs -f backend   # backend only
 ```
 
 ### Rebuild after code changes
 
-The backend and worker mount source code as volumes — changes are picked up immediately (hot-reload enabled for the backend). If you change `requirements.txt` or the Dockerfile:
+Source code is volume-mounted — Python changes are picked up by hot-reload automatically.
+Only rebuild when `requirements.txt` or a Dockerfile changes:
 
 ```bash
-docker compose up -d --build backend worker
+docker compose build backend worker
+docker compose up -d --no-deps backend worker
+```
+
+### Run database migrations
+
+```bash
+docker exec va_backend alembic upgrade head
 ```
 
 ### Connect to PostgreSQL directly
 
 ```bash
-docker compose exec postgres psql -U va_user -d va_platform
-```
-
-### Connect to Redis directly
-
-```bash
-docker compose exec redis redis-cli
-```
-
-### Run Celery worker manually (for debugging)
-
-```bash
-docker compose exec worker celery -A celery_app.celery_app worker --loglevel=debug
-```
-
-### Monitor Celery tasks
-
-```bash
-docker compose exec worker celery -A celery_app.celery_app inspect active
-docker compose exec worker celery -A celery_app.celery_app inspect stats
+docker exec va_postgres psql -U va_user -d va_platform
 ```
 
 ---
@@ -210,26 +276,34 @@ docker compose exec worker celery -A celery_app.celery_app inspect stats
 
 ```
 va-platform/
-├── backend/                  # FastAPI application
-│   ├── main.py               # API routes and schemas
-│   ├── requirements.txt      # Python dependencies
+├── backend/
+│   ├── main.py               # FastAPI routes, middleware, schemas
+│   ├── crud.py               # Database CRUD + finding normalisation
+│   ├── pdf_report.py         # PDF report generator (fpdf2)
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── db/
+│       ├── models.py         # SQLAlchemy models
+│       ├── database.py       # Async engine + session
+│       └── migrations/       # Alembic migrations (0001–0004)
+├── worker/
+│   ├── celery_app.py         # Celery task definitions
 │   └── Dockerfile
-├── worker/                   # Celery worker
-│   ├── celery_app.py         # Task definitions
-│   └── Dockerfile
-├── scanner/                  # Scanner integrations
+├── scanner/
 │   ├── zap_runner.py         # OWASP ZAP orchestration
-│   └── nuclei_runner.py      # Nuclei orchestration
+│   ├── nuclei_runner.py      # Nuclei orchestration
+│   ├── testssl_runner.py     # testssl.sh via Docker socket
+│   └── nmap_runner.py        # nmap via Docker socket
 ├── db/
 │   └── init.sql              # PostgreSQL schema (auto-run on first start)
-├── reports/                  # Scan output files (JSON/JSONL)
-├── frontend/                 # Placeholder (Phase 4+)
-├── grafana/                  # Grafana provisioning (Phase 4)
+├── grafana/
 │   └── provisioning/
-│       ├── datasources/
-│       └── dashboards/
+│       ├── datasources/      # Auto-configured PostgreSQL connection
+│       └── dashboards/       # Pre-built VA dashboard JSON
 ├── docker-compose.yml
-├── .env.example              # Copy to .env before running
+├── .env.example
+├── how_to_install.md         # Full installation guide (Windows + Linux)
+├── QA_TEST_CASES_GENERATED.md # 137 test cases across 10 categories
 └── README.md
 ```
 
@@ -238,11 +312,8 @@ va-platform/
 ## Stopping the Stack
 
 ```bash
-# Stop containers (keep volumes)
-docker compose down
-
-# Stop and delete all data volumes (full reset)
-docker compose down -v
+docker compose down          # stop (keep data)
+docker compose down -v       # stop + delete all data (full reset)
 ```
 
 ---
@@ -252,14 +323,15 @@ docker compose down -v
 | Phase | Status | Description |
 |-------|--------|-------------|
 | 0 | Done | Project setup, Docker Compose stack |
-| 1 | Pending | ZAP + Nuclei scan integration |
-| 2 | Pending | PostgreSQL models + CRUD |
-| 3 | Pending | Result normalisation + deduplication |
-| 4 | Pending | Grafana dashboard |
-| 5 | Pending | Full workflow engine |
-| 6 | Pending | CI/CD integration |
-| 7 | Pending | Advanced tools (subfinder, katana, ffuf) |
-| 8 | Pending | Enterprise features (auth, alerts, Jira) |
+| 1 | Done | ZAP + Nuclei scan integration |
+| 2 | Done | PostgreSQL models + async CRUD |
+| 3 | Done | Result normalisation + deduplication |
+| 4 | Done | Grafana dashboard (auto-provisioned) |
+| 5 | Done | Asset management + Celery Beat scheduled scans |
+| 6 | Done | API hardening (rate limiting, API key auth, input validation) |
+| 7 | Done | Additional scanners: testssl.sh + nmap |
+| Post-launch | Done | PDF reports, DELETE endpoint, Swagger UI improvements |
+| 8 | Planned | Enterprise features (JWT auth, Slack/email alerts, Jira) |
 
 ---
 
@@ -267,5 +339,5 @@ docker compose down -v
 
 - This platform is designed for **authorised security testing only**.
 - Never run scans against targets you do not own or have explicit written permission to test.
-- Change all default credentials and API keys in `.env` before any non-local deployment.
-- Do not expose ports 8000, 8080, or 5432 to the public internet in development mode.
+- Change all default credentials in `.env` before any non-local deployment.
+- Do not expose ports 8000, 5432, or 6379 to the public internet in development mode.
