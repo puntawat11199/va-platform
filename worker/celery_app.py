@@ -200,30 +200,35 @@ def run_scan(self, scan_id: str, target_url: str, active_scan: bool = False) -> 
         logger.warning("run_scan aborted | scan_id=%s already %s — retry discarded", scan_id, scan.status)
         return {"scan_id": scan_id, "status": scan.status.value, "findings_count": 0}
 
-    zap_findings: list[dict] = []
+    nmap_findings: list[dict] = []
     nuclei_findings: list[dict] = []
     testssl_findings: list[dict] = []
-    nmap_findings: list[dict] = []
+    zap_findings: list[dict] = []
 
     try:
         asyncio.run(_db_store_task_id(scan_id, self.request.id))
         asyncio.run(_db_mark_running(scan_id))
 
-        # --- ZAP ---
-        from scanner.zap_runner import run_zap_scan
-        zap_findings = run_zap_scan(
-            scan_id=scan_id,
-            target_url=target_url,
-            active_scan=active_scan,
-        )
-        logger.info("run_scan | scan_id=%s zap_findings=%d", scan_id, len(zap_findings))
+        # Scan order: fastest → slowest
+        # 1. nmap   (~5–30s)   — port/service discovery
+        # 2. Nuclei (~20–60s)  — CVE / misconfiguration templates
+        # 3. testssl (~30–120s) — TLS/SSL analysis (HTTPS only)
+        # 4. ZAP    (2–20 min) — full web spider + vulnerability scan
 
-        # --- Nuclei ---
+        # --- 1. nmap — non-fatal ---
+        from scanner.nmap_runner import run_nmap_scan
+        try:
+            nmap_findings = run_nmap_scan(scan_id=scan_id, target_url=target_url)
+            logger.info("run_scan | scan_id=%s nmap_findings=%d", scan_id, len(nmap_findings))
+        except Exception as nmap_exc:
+            logger.warning("run_scan | scan_id=%s nmap failed (non-fatal): %s", scan_id, nmap_exc)
+
+        # --- 2. Nuclei ---
         from scanner.nuclei_runner import run_nuclei_scan
         nuclei_findings = run_nuclei_scan(scan_id=scan_id, target_url=target_url)
         logger.info("run_scan | scan_id=%s nuclei_findings=%d", scan_id, len(nuclei_findings))
 
-        # --- testssl.sh (HTTPS targets only) — non-fatal ---
+        # --- 3. testssl.sh (HTTPS targets only) — non-fatal ---
         from scanner.testssl_runner import run_testssl_scan
         try:
             testssl_findings = run_testssl_scan(scan_id=scan_id, target_url=target_url)
@@ -232,13 +237,14 @@ def run_scan(self, scan_id: str, target_url: str, active_scan: bool = False) -> 
             logger.warning("run_scan | scan_id=%s testssl failed (non-fatal): %s", scan_id, testssl_exc)
             testssl_findings = []
 
-        # --- nmap — non-fatal ---
-        from scanner.nmap_runner import run_nmap_scan
-        try:
-            nmap_findings = run_nmap_scan(scan_id=scan_id, target_url=target_url)
-            logger.info("run_scan | scan_id=%s nmap_findings=%d", scan_id, len(nmap_findings))
-        except Exception as nmap_exc:
-            logger.warning("run_scan | scan_id=%s nmap failed (non-fatal): %s", scan_id, nmap_exc)
+        # --- 4. ZAP (slowest) ---
+        from scanner.zap_runner import run_zap_scan
+        zap_findings = run_zap_scan(
+            scan_id=scan_id,
+            target_url=target_url,
+            active_scan=active_scan,
+        )
+        logger.info("run_scan | scan_id=%s zap_findings=%d", scan_id, len(zap_findings))
 
         # --- Persist ---
         saved = asyncio.run(_db_save_findings(scan_id, zap_findings, nuclei_findings, testssl_findings, nmap_findings))

@@ -6,10 +6,10 @@ Completed: 2026-05-18
 
 ## Overview
 
-Phase 7 added two new scanners to the pipeline, both running as ephemeral Docker containers via the mounted Docker socket. The scan sequence is now:
+Phase 7 added two new scanners to the pipeline, both running as ephemeral Docker containers via the mounted Docker socket. The scan sequence is now (fastest → slowest):
 
 ```
-ZAP → Nuclei → testssl.sh → nmap → persist findings
+nmap → Nuclei → testssl.sh → ZAP → persist findings
 ```
 
 ---

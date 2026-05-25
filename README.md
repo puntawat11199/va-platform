@@ -18,11 +18,11 @@ A self-hosted Web Vulnerability Assessment (VA) platform that orchestrates **OWA
                                     └────────┬────────┘    (scheduler)
                                              │ consume
                                     ┌────────▼────────────────────────┐
-                                    │        Celery Worker            │
-                                    │  1. ZAP runner   (web vulns)    │
-                                    │  2. Nuclei runner (CVEs/misconf)│
-                                    │  3. testssl runner (TLS/SSL)    │
-                                    │  4. nmap runner  (open ports)   │
+                                    │        Celery Worker                   │
+                                    │  1. nmap runner    (ports,  ~5–30s)    │
+                                    │  2. Nuclei runner  (CVEs,   ~20–60s)   │
+                                    │  3. testssl runner (TLS,    ~30–120s)  │
+                                    │  4. ZAP runner     (web vulns, 2–20min)│
                                     └──────────────┬──────────────────┘
                                                    │
                                     ┌──────────────▼──────────────────┐
