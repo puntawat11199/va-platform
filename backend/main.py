@@ -59,20 +59,37 @@ def _validate_scan_url(v: HttpUrl) -> HttpUrl:
     return v
 
 
+_VALID_TOOLS = {"ZAP", "NUCLEI", "TESTSSL", "NMAP"}
+
+
 class ScanRequest(BaseModel):
     target_url: HttpUrl
     active_scan: bool = False
+    tools: list[str] | None = None  # None = run all tools; subset e.g. ["NMAP","NUCLEI"]
 
     @field_validator("target_url")
     @classmethod
     def validate_target_url(cls, v: HttpUrl) -> HttpUrl:
         return _validate_scan_url(v)
 
+    @field_validator("tools")
+    @classmethod
+    def validate_tools(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("tools list must not be empty — omit the field to run all tools")
+        invalid = set(t.upper() for t in v) - _VALID_TOOLS
+        if invalid:
+            raise ValueError(f"Unknown tools: {sorted(invalid)}. Valid options: {sorted(_VALID_TOOLS)}")
+        return [t.upper() for t in v]
+
 
 class ScanResponse(BaseModel):
     scan_id: str
     target_url: str
     active_scan: bool
+    tools: list[str]
     status: str
     created_at: str
 
@@ -330,10 +347,114 @@ async def health_check(request: Request) -> HealthResponse:
 # Routes — Scans
 # ---------------------------------------------------------------------------
 
-@app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Scans"])
+@app.post("/scan", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Scans"],
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "All tools — full scan (default)": {
+                            "summary": "All tools — full scan (default)",
+                            "description": "Runs all 4 scanners in order: nmap → Nuclei → testssl → ZAP. Omit the tools field to run everything.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                            },
+                        },
+                        "Single tool — nmap only": {
+                            "summary": "Single tool — nmap only (~30s)",
+                            "description": "Quick port scan only. Use when you just want to see what ports are open.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                                "tools": ["NMAP"],
+                            },
+                        },
+                        "Single tool — Nuclei only": {
+                            "summary": "Single tool — Nuclei only (~2 min)",
+                            "description": "Check for known CVEs and misconfigurations only.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                                "tools": ["NUCLEI"],
+                            },
+                        },
+                        "Single tool — testssl only": {
+                            "summary": "Single tool — testssl only (~2 min)",
+                            "description": "TLS/SSL audit only. HTTPS targets only — HTTP targets are skipped automatically.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                                "tools": ["TESTSSL"],
+                            },
+                        },
+                        "Single tool — ZAP only": {
+                            "summary": "Single tool — ZAP only (2–20 min)",
+                            "description": "Web application vulnerability scan only (spider + passive analysis).",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                                "tools": ["ZAP"],
+                            },
+                        },
+                        "ZAP active scan": {
+                            "summary": "ZAP active scan — sends attack payloads",
+                            "description": "WARNING: Sends real attack payloads. Only use against targets you own or have written permission to test.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": True,
+                                "tools": ["ZAP"],
+                            },
+                        },
+                        "Custom combination — nmap + Nuclei": {
+                            "summary": "Custom combination — nmap + Nuclei (~3 min)",
+                            "description": "Ports and CVE check only. Faster than a full scan — skips TLS and web crawling.",
+                            "value": {
+                                "target_url": "https://example.com/",
+                                "active_scan": False,
+                                "tools": ["NMAP", "NUCLEI"],
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
+)
 @limiter.limit("10/minute")
 async def submit_scan(request: Request, payload: ScanRequest, db: AsyncSession = Depends(get_db)) -> ScanResponse:
-    """Submit a new scan job. Returns scan_id immediately; poll GET /scan/{scan_id} for results."""
+    """
+    Submit a new scan job. Returns `scan_id` immediately — poll **GET /scan/{scan_id}** for results.
+
+    ---
+
+    **All tools (default)** — omit the `tools` field:
+    ```json
+    {"target_url": "https://example.com/", "active_scan": false}
+    ```
+    Runs all 4 scanners in order: **nmap → Nuclei → testssl → ZAP**
+
+    ---
+
+    **Single tool** — pass one item in `tools`:
+    ```json
+    {"target_url": "https://example.com/", "tools": ["NMAP"]}
+    ```
+
+    | Tool | What it scans | Time |
+    |------|--------------|------|
+    | `NMAP` | Open ports and services | ~30s |
+    | `NUCLEI` | Known CVEs and misconfigurations | ~2 min |
+    | `TESTSSL` | TLS/SSL weaknesses (HTTPS only) | ~2 min |
+    | `ZAP` | Web application vulnerabilities | 2–20 min |
+
+    ---
+
+    **Custom combination** — pass multiple tools:
+    ```json
+    {"target_url": "https://example.com/", "tools": ["NMAP", "NUCLEI"]}
+    ```
+    """
     target_str = str(payload.target_url)
 
     # Cancel any PENDING/RUNNING scan for the same target so the old task
@@ -350,11 +471,12 @@ async def submit_scan(request: Request, payload: ScanRequest, db: AsyncSession =
     scan_id    = str(uuid.uuid4())
     asset      = await crud.get_or_create_asset(db, target_str)
     scan       = await crud.create_scan(db, scan_id=scan_id, target_url=target_str, active_scan=payload.active_scan, asset_id=str(asset.id))
+    tools      = payload.tools or sorted(_VALID_TOOLS)   # None = all tools
     celery_task_id = str(uuid.uuid4())
-    _celery.send_task("worker.celery_app.run_scan", args=[scan_id, target_str, payload.active_scan], queue="scans", task_id=celery_task_id)
+    _celery.send_task("worker.celery_app.run_scan", args=[scan_id, target_str, payload.active_scan, tools], queue="scans", task_id=celery_task_id)
     await crud.set_scan_task_id(db, scan_id, celery_task_id)
-    logger.info("Scan submitted: scan_id=%s task_id=%s target=%s active=%s", scan_id, celery_task_id, target_str, payload.active_scan)
-    return ScanResponse(scan_id=str(scan.id), target_url=scan.target, active_scan=scan.active_scan, status=scan.status.value, created_at=_iso(scan.created_at))
+    logger.info("Scan submitted: scan_id=%s task_id=%s target=%s active=%s tools=%s", scan_id, celery_task_id, target_str, payload.active_scan, tools)
+    return ScanResponse(scan_id=str(scan.id), target_url=scan.target, active_scan=scan.active_scan, tools=tools, status=scan.status.value, created_at=_iso(scan.created_at))
 
 
 @app.get("/scan/{scan_id}", response_model=ScanStatusResponse, tags=["Scans"])
