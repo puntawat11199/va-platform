@@ -165,6 +165,9 @@ async def _db_save_findings(scan_id: str, zap_findings: list[dict], nuclei_findi
 # Core scan task
 # ---------------------------------------------------------------------------
 
+_ALL_TOOLS = {"ZAP", "NUCLEI", "TESTSSL", "NMAP"}
+
+
 @celery_app.task(
     bind=True,
     name="worker.celery_app.run_scan",
@@ -172,9 +175,6 @@ async def _db_save_findings(scan_id: str, zap_findings: list[dict], nuclei_findi
     default_retry_delay=30,
     throws=(ValueError,),
 )
-_ALL_TOOLS = {"ZAP", "NUCLEI", "TESTSSL", "NMAP"}
-
-
 def run_scan(self, scan_id: str, target_url: str, active_scan: bool = False, tools: list[str] | None = None) -> dict:
     """
     Orchestrate a vulnerability scan against target_url.
