@@ -340,4 +340,6 @@ docker compose down -v       # stop + delete all data (full reset)
 - This platform is designed for **authorised security testing only**.
 - Never run scans against targets you do not own or have explicit written permission to test.
 - Change all default credentials in `.env` before any non-local deployment.
-- Do not expose ports 8000, 5432, or 6379 to the public internet in development mode.
+- PostgreSQL (5432), Redis (6379), and ZAP (8090) are bound to `127.0.0.1` — accessible from this machine only.
+- API (8000) and Grafana (3000) are accessible on the LAN — protected by API key and Grafana login respectively.
+- Do not expose any ports to the public internet without a reverse proxy and TLS termination.

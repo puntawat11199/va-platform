@@ -359,11 +359,13 @@ va_backend    healthy         0.0.0.0:8000->8000/tcp
 va_beat       running
 va_grafana    healthy         0.0.0.0:3000->3000/tcp
 va_nuclei     running
-va_postgres   healthy         0.0.0.0:5432->5432/tcp
-va_redis      healthy         0.0.0.0:6379->6379/tcp
+va_postgres   healthy         127.0.0.1:5432->5432/tcp
+va_redis      healthy         127.0.0.1:6379->6379/tcp
 va_worker     running
-va_zap        healthy         0.0.0.0:8090->8080/tcp
+va_zap        healthy         127.0.0.1:8090->8080/tcp
 ```
+
+> **Note:** PostgreSQL, Redis, and ZAP are bound to `127.0.0.1` (this machine only). API and Grafana are on `0.0.0.0` (LAN-accessible).
 
 ### Check the API health endpoint
 
@@ -711,10 +713,11 @@ The default configuration is designed for local development. Before exposing thi
 
 2. **Restrict CORS** — change `CORS_ORIGINS=*` to your specific frontend origin
 
-3. **Do not expose ports publicly** — bind to `127.0.0.1` in `docker-compose.yml` if the host has a public IP:
+3. **Dangerous ports are already localhost-only** — PostgreSQL (5432), Redis (6379), and ZAP (8090) are bound to `127.0.0.1` by default and cannot be reached from the network. If you ever need to tighten the API or Grafana as well:
    ```yaml
    ports:
-     - "127.0.0.1:8000:8000"   # API only reachable from localhost
+     - "127.0.0.1:8000:8000"   # API reachable from this machine only
+     - "127.0.0.1:3000:3000"   # Grafana reachable from this machine only
    ```
 
 4. **Put a reverse proxy in front** (nginx/Caddy) with TLS termination for any non-localhost access
