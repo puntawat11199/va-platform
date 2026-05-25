@@ -86,7 +86,7 @@ async def update_scan_status(
 
     if status == ScanStatus.RUNNING:
         scan.started_at = _utcnow()
-    elif status in (ScanStatus.COMPLETED, ScanStatus.FAILED):
+    elif status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
         scan.finished_at = _utcnow()
 
     if error is not None:
@@ -134,6 +134,27 @@ async def get_active_scan_for_target(db: AsyncSession, target_url: str) -> Scan 
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def cancel_scan(db: AsyncSession, scan_id: str) -> Scan | None:
+    """
+    Mark a scan as CANCELLED and set finished_at.
+    Does NOT delete the scan or its findings — all data is preserved.
+    The caller is responsible for revoking the Celery task before calling this.
+    Returns None if the scan does not exist or is already in a terminal state.
+    """
+    result = await db.execute(select(Scan).where(Scan.id == uuid.UUID(scan_id)))
+    scan = result.scalar_one_or_none()
+    if scan is None:
+        return None
+    if scan.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+        return scan   # already terminal — return as-is, caller decides what to do
+    scan.status = ScanStatus.CANCELLED
+    scan.finished_at = _utcnow()
+    scan.error = "Cancelled by user"
+    await db.commit()
+    await db.refresh(scan)
+    return scan
 
 
 async def delete_scan(db: AsyncSession, scan_id: str) -> bool:

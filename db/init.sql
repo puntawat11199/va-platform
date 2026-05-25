@@ -20,7 +20,8 @@ DO $$ BEGIN
         'PENDING',
         'RUNNING',
         'COMPLETED',
-        'FAILED'
+        'FAILED',
+        'CANCELLED'
     );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;

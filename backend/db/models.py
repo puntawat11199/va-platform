@@ -38,6 +38,7 @@ class ScanStatus(str, enum.Enum):
     RUNNING   = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED    = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class SeverityLevel(str, enum.Enum):

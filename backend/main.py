@@ -392,6 +392,44 @@ async def download_scan_report(request: Request, scan_id: uuid.UUID, db: AsyncSe
     )
 
 
+@app.post("/scan/{scan_id}/cancel", response_model=ScanStatusResponse, tags=["Scans"])
+@limiter.limit("30/minute")
+async def cancel_scan(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> ScanStatusResponse:
+    """
+    Cancel a running or pending scan. Keeps the scan record and all findings found so far.
+    Use DELETE /scan/{id} if you want to remove the scan entirely.
+    """
+    scan = await crud.get_scan_status(db, str(scan_id))
+    if scan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Scan {scan_id!r} not found")
+
+    from db.models import ScanStatus
+    if scan.status in (ScanStatus.COMPLETED, ScanStatus.FAILED, ScanStatus.CANCELLED):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Scan is already in terminal state: {scan.status.value}",
+        )
+
+    # Revoke Celery task before updating DB
+    if scan.celery_task_id:
+        _celery.control.revoke(scan.celery_task_id, terminate=True, signal="SIGTERM")
+        logger.info("Revoked Celery task %s for cancelled scan_id=%s", scan.celery_task_id, scan_id)
+
+    cancelled = await crud.cancel_scan(db, str(scan_id))
+
+    # Re-fetch with findings for the response
+    full = await crud.get_scan(db, str(scan_id))
+    logger.info("Cancelled scan_id=%s — findings preserved: %d", scan_id, len(full.vulnerabilities))
+
+    return ScanStatusResponse(
+        scan_id=str(full.id), target_url=full.target, active_scan=full.active_scan,
+        status=full.status.value, created_at=_iso(full.created_at),
+        started_at=_iso(full.started_at), finished_at=_iso(full.finished_at),
+        error=full.error, findings_count=len(full.vulnerabilities),
+        findings=[v.raw for v in full.vulnerabilities if v.raw is not None],
+    )
+
+
 @app.delete("/scan/{scan_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Scans"])
 @limiter.limit("30/minute")
 async def delete_scan(request: Request, scan_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
