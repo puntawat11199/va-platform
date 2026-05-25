@@ -136,7 +136,7 @@ services:
     # then hand off to Celery. The -silent flag suppresses nuclei banner noise.
     command: >
       sh -c "nuclei -update-templates -silent; celery -A celery_app.celery_app worker
-      --loglevel=info --queues=scans --hostname=va-worker@%h"
+      --pool=threads --loglevel=info --queues=scans --hostname=va-worker@%h"
     volumes:
       - ./worker:/app
       - ./scanner:/app/scanner
