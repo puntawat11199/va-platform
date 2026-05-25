@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,10 +25,12 @@ NUCLEI_TEMPLATES_PATH: str = os.getenv("NUCLEI_TEMPLATES_PATH", "/root/nuclei-te
 DEFAULT_TEMPLATE_TAGS: list[str] = ["cves", "misconfigurations", "exposures", "technologies", "sqli", "xss", "lfi", "ssrf", "rce"]
 DEFAULT_SEVERITIES: list[str] = ["critical", "high", "medium", "low", "info"]
 
-NUCLEI_TIMEOUT: int = 3600    # max seconds per scan (1 hour hard limit)
-NUCLEI_RATE_LIMIT: int = 50   # requests per second
-NUCLEI_BULK_SIZE: int = 25    # templates executed in parallel
-NUCLEI_CONCURRENCY: int = 10  # hosts scanned in parallel
+NUCLEI_TIMEOUT: int = 3600         # max seconds per scan (1 hour hard limit)
+NUCLEI_RATE_LIMIT: int = 50        # max requests per second (Cloudflare-safe burst rate)
+NUCLEI_BULK_SIZE: int = 25         # templates executed in parallel per host
+NUCLEI_CONCURRENCY: int = 10       # hosts scanned in parallel
+NUCLEI_RETRIES: int = 2            # retries for transient network/WAF failures
+NUCLEI_CONNECT_TIMEOUT: int = 10   # seconds per request (low = detect unresponsive hosts faster)
 
 
 # ---------------------------------------------------------------------------
@@ -58,17 +61,19 @@ def build_nuclei_command(
     cmd = [
         "nuclei",
         "-u", target_url,
-        "-t", NUCLEI_TEMPLATES_PATH,   # explicit path required in nuclei v3
+        "-t", NUCLEI_TEMPLATES_PATH,        # explicit path required in nuclei v3
         "-severity", ",".join(severities),
         "-json-export", output_file,
         "-no-color",
-        "-timeout", "30",
+        "-timeout", str(NUCLEI_CONNECT_TIMEOUT),
+        "-retries", str(NUCLEI_RETRIES),    # retry transient WAF/network failures
         "-rate-limit", str(NUCLEI_RATE_LIMIT),
         "-bulk-size", str(NUCLEI_BULK_SIZE),
         "-concurrency", str(NUCLEI_CONCURRENCY),
-        "-ni",                          # disable interactsh (prevents OAST templates marking target as unresponsive)
-        "-nh",                          # disable redirects that probe external hosts
-        "-exclude-id", "hpe-autopass-panel,apachespark-ui-exposed,apache-kyuubi-config",  # probe non-standard ports, create malformed URLs against non-80/443 targets
+        "-ni",                              # disable interactsh (prevents OAST templates marking target as unresponsive)
+        "-nh",                              # disable redirects that probe external hosts
+        "-disable-update-check",            # prevent mid-scan template auto-update (updates run at worker startup)
+        "-exclude-id", "hpe-autopass-panel,apachespark-ui-exposed,apache-kyuubi-config",
     ]
 
     logger.debug("nuclei command: %s", " ".join(cmd))
@@ -164,6 +169,10 @@ def run_nuclei_scan(
 
     cmd = build_nuclei_command(target_url, output_file, tags, severities)
 
+    start_time = time.time()
+    unresponsive_count = 0
+    templates_loaded = 0
+
     try:
         # Stream nuclei stderr (progress/info lines) to worker logs in real time
         process = subprocess.Popen(
@@ -177,25 +186,50 @@ def run_nuclei_scan(
         stderr_lines: list[str] = []
         for line in process.stderr:
             line = line.rstrip()
-            if line:
-                stderr_lines.append(line)
-                logger.info("scan_id=%s nuclei: %s", scan_id, line)
+            if not line:
+                continue
+            stderr_lines.append(line)
+            logger.info("scan_id=%s nuclei: %s", scan_id, line)
+
+            # Structured detection — permanently unresponsive host (WAF/Cloudflare block)
+            if "found unresponsive permanently" in line:
+                unresponsive_count += 1
+                logger.warning(
+                    "scan_id=%s nuclei marked host permanently unresponsive "
+                    "(WAF/Cloudflare likely blocking scan traffic) — elapsed=%.0fs",
+                    scan_id, time.time() - start_time,
+                )
+
+            # Track template count for diagnostics
+            if "Templates loaded for current scan:" in line:
+                try:
+                    templates_loaded = int(line.split("Templates loaded for current scan:")[-1].strip())
+                except ValueError:
+                    pass
 
         process.wait(timeout=NUCLEI_TIMEOUT)
         result_returncode = process.returncode
+        elapsed = time.time() - start_time
 
         if result_returncode not in (0, 1):
             logger.error(
-                "scan_id=%s nuclei exited %d", scan_id, result_returncode,
+                "scan_id=%s nuclei exited %d elapsed=%.0fs", scan_id, result_returncode, elapsed,
             )
             raise RuntimeError(
                 f"nuclei exited with unexpected code {result_returncode}"
             )
 
+        if unresponsive_count:
+            logger.warning(
+                "run_nuclei_scan | scan_id=%s %d host(s) permanently unresponsive "
+                "— findings may be incomplete (WAF/rate-limit interference) elapsed=%.0fs templates=%d",
+                scan_id, unresponsive_count, elapsed, templates_loaded,
+            )
+
         findings = parse_nuclei_output(output_file, scan_id)
         logger.info(
-            "run_nuclei_scan complete | scan_id=%s findings=%d",
-            scan_id, len(findings),
+            "run_nuclei_scan complete | scan_id=%s findings=%d elapsed=%.0fs templates=%d",
+            scan_id, len(findings), elapsed, templates_loaded,
         )
         return findings
 
