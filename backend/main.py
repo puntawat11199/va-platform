@@ -14,7 +14,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
-from pydantic import BaseModel, HttpUrl, field_validator
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -46,16 +48,30 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 # Schemas
 # ---------------------------------------------------------------------------
 
-def _validate_scan_url(v: HttpUrl) -> HttpUrl:
-    url_str = str(v)
-    if len(url_str) > MAX_URL_LENGTH:
-        raise ValueError(f"URL too long (max {MAX_URL_LENGTH} characters)")
-    if v.scheme not in {"http", "https"}:
-        raise ValueError("URL must use http or https scheme")
-    if not v.host:
-        raise ValueError("URL must have a valid hostname")
-    if "#" in url_str:
-        raise ValueError("URL must not contain fragments")
+def _normalise_target(v: str) -> str:
+    """
+    Accept a bare IP/hostname or a full URL; always return a full http(s):// string.
+
+    Examples:
+      "192.168.1.1"        → "http://192.168.1.1"
+      "192.168.1.1:8080"   → "http://192.168.1.1:8080"
+      "10.0.0.1/admin"     → "http://10.0.0.1/admin"
+      "https://example.com/"  → "https://example.com/"  (unchanged)
+    """
+    v = v.strip()
+    if not v:
+        raise ValueError("Target must not be empty")
+    if len(v) > MAX_URL_LENGTH:
+        raise ValueError(f"Target too long (max {MAX_URL_LENGTH} characters)")
+    if "#" in v:
+        raise ValueError("Target must not contain fragments")
+    if "://" not in v:
+        v = "http://" + v
+    parsed = urlparse(v)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Target must use http or https scheme")
+    if not parsed.hostname:
+        raise ValueError("Target must have a valid hostname or IP address")
     return v
 
 
@@ -63,14 +79,14 @@ _VALID_TOOLS = {"ZAP", "NUCLEI", "TESTSSL", "NMAP"}
 
 
 class ScanRequest(BaseModel):
-    target_url: HttpUrl
+    target_url: str
     active_scan: bool = False
     tools: list[str] | None = None  # None = run all tools; subset e.g. ["NMAP","NUCLEI"]
 
     @field_validator("target_url")
     @classmethod
-    def validate_target_url(cls, v: HttpUrl) -> HttpUrl:
-        return _validate_scan_url(v)
+    def validate_target_url(cls, v: str) -> str:
+        return _normalise_target(v)
 
     @field_validator("tools")
     @classmethod
@@ -132,12 +148,12 @@ class VulnerabilityResponse(BaseModel):
 
 
 class AssetRequest(BaseModel):
-    url: HttpUrl
+    url: str
 
     @field_validator("url")
     @classmethod
-    def validate_url(cls, v: HttpUrl) -> HttpUrl:
-        return _validate_scan_url(v)
+    def validate_url(cls, v: str) -> str:
+        return _normalise_target(v)
 
 
 class AssetResponse(BaseModel):
@@ -361,6 +377,23 @@ async def health_check(request: Request) -> HealthResponse:
                                 "active_scan": False,
                             },
                         },
+                        "Scan a bare IP address": {
+                            "summary": "Scan a bare IP address",
+                            "description": "Pass a plain IPv4 address (with optional port). http:// is added automatically.",
+                            "value": {
+                                "target_url": "192.168.1.1",
+                                "active_scan": False,
+                            },
+                        },
+                        "Scan IP with non-standard port": {
+                            "summary": "Scan IP with non-standard port",
+                            "description": "Include :port directly in the target — no scheme needed.",
+                            "value": {
+                                "target_url": "192.168.1.1:8080",
+                                "active_scan": False,
+                                "tools": ["NMAP", "NUCLEI"],
+                            },
+                        },
                         "Single tool — nmap only": {
                             "summary": "Single tool — nmap only (~30s)",
                             "description": "Quick port scan only. Use when you just want to see what ports are open.",
@@ -425,6 +458,11 @@ async def health_check(request: Request) -> HealthResponse:
 async def submit_scan(request: Request, payload: ScanRequest, db: AsyncSession = Depends(get_db)) -> ScanResponse:
     """
     Submit a new scan job. Returns `scan_id` immediately — poll **GET /scan/{scan_id}** for results.
+
+    `target_url` accepts a full URL **or a bare IP/hostname** — `http://` is added automatically when no scheme is given:
+    - `https://example.com/` — full URL (unchanged)
+    - `192.168.1.1` → `http://192.168.1.1`
+    - `192.168.1.1:8080` → `http://192.168.1.1:8080`
 
     ---
 
