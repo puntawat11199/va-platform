@@ -207,6 +207,10 @@ services:
       - va-net
     environment:
       ZAP_API_KEY: ${ZAP_API_KEY:-changeme_zap_dev_2024}
+      # Set JVM heap: min 256m, max 1g — prevents ZAP from crashing mid-scan
+      # on complex/Cloudflare-protected targets due to heap exhaustion.
+      # Increase to -Xmx2g if active scans still crash on large apps.
+      JVM_PROPERTIES: "-Xms256m -Xmx1g"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/JSON/core/view/version/?apikey=${ZAP_API_KEY:-changeme_zap_dev_2024} || exit 1"]
       interval: 20s
