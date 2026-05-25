@@ -43,7 +43,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # localhost only — DB must never be reachable from the network
     networks:
       - va-net
     healthcheck:
@@ -64,7 +64,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # localhost only — Redis must never be reachable from the network
     networks:
       - va-net
     healthcheck:
@@ -202,7 +202,7 @@ services:
       - zap_data:/zap/wrk
       - reports_data:/reports
     ports:
-      - "8090:8080"   # host 8090 → container 8080 (avoids conflict with existing 8080 usage)
+      - "127.0.0.1:8090:8080"   # localhost only — ZAP API must never be reachable from the network
     networks:
       - va-net
     environment:
